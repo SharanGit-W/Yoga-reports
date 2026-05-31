@@ -7,6 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, List
+from datetime import datetime
 
 import streamlit as st
 import numpy as np
@@ -30,12 +31,12 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 # =============================================================================
 PAGE_SIZE = A4
 LEFT_MARGIN, RIGHT_MARGIN = 14 * mm, 14 * mm
-TOP_MARGIN, BOTTOM_MARGIN = 16 * mm, 16 * mm
+TOP_MARGIN, BOTTOM_MARGIN = 20 * mm, 20 * mm  # Increased for header/footer space
 
 BRAND_RED = colors.HexColor("#8A1E1E")
 BRAND_DARK = colors.HexColor("#222222")
 BRAND_GREY = colors.HexColor("#666666")
-BRAND_LIGHT = colors.HexColor("#F5F5F5")
+BRAND_LIGHT = colors.HexColor("#F9F9F9")
 CHART_RED = "#8A1E1E"
 CHART_DARK = "#222222"
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -48,7 +49,7 @@ class ReportMeta:
     month_key: str
 
 # =============================================================================
-# Core Logic (Same proven logic from v2.4)
+# Core Logic (Updated with Strict Logic & Duplicate Handling)
 # =============================================================================
 def safe_str(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
@@ -80,10 +81,9 @@ def find_header_row(path: str) -> int:
     raise ValueError("Could not find header row containing 'SlNo' and 'StudentId'.")
 
 def attendance_cell_to_bool(series: pd.Series) -> pd.Series:
-    if series.dtype == "O":
-        s = series.fillna("").astype(str).str.strip().str.lower()
-        return s.isin({"present", "p", "x", "1", "yes", "y", "true"})
-    return (~series.isna()) & (series.astype(str).str.strip().str.lower() != "0")
+    # STRICT LOGIC: Force string conversion and strictly check for explicit present markers.
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin({"present", "p", "x", "1", "yes", "y", "true"})
 
 def extract_metadata(raw: pd.DataFrame) -> str:
     for _, row in raw.head(5).iterrows():
@@ -99,7 +99,18 @@ def read_and_clean(input_file: str):
     header_row = find_header_row(input_file)
     raw = pd.read_excel(input_file, header=header_row)
     raw.columns = [normalize_col(c) for c in raw.columns]
-    raw = raw.dropna(how="all").reset_index(drop=True)
+    
+    # Remove entirely empty rows
+    raw = raw.dropna(how="all")
+    
+    # DUPLICATE HANDLING: Ensure StudentId exists, sort by data richness, and drop duplicates cleanly
+    if "StudentId" in raw.columns:
+        raw = raw.dropna(subset=["StudentId"])
+        raw['data_points'] = raw.notna().sum(axis=1)
+        raw = raw.sort_values('data_points', ascending=False).drop_duplicates(subset=['StudentId'], keep='first')
+        raw = raw.drop(columns=['data_points'])
+
+    raw = raw.reset_index(drop=True)
 
     status_idx = raw.columns.get_loc("Status")
     date_cols, date_index = [], []
@@ -148,13 +159,14 @@ def build_analytics(df, date_cols, date_index, presence):
     least_active = df[["StudentName", "Batch", "Present_Count_Calc"]].sort_values(["Present_Count_Calc", "StudentName"], ascending=[True, True]).reset_index(drop=True)
 
     total_att = int(daily_totals["Attendance"].sum())
+    avg_visits = round(total_att/max(1, len(df)), 1)
     kpis = pd.DataFrame({
         "Metric": ["Registered Members", "Operating Days", "Total Center Visits", "Avg Visits per Member", "Busiest Day"],
-        "Value": [len(df), len(date_cols), total_att, round(total_att/max(1, len(df)), 1), dow_totals.loc[dow_totals['Attendance'].idxmax(), 'DayOfWeek']]
+        "Value": [len(df), len(date_cols), total_att, avg_visits, dow_totals.loc[dow_totals['Attendance'].idxmax(), 'DayOfWeek']]
     })
     
     insights = [
-        f"Habit Building: On average, each member visited {kpis.iloc[3]['Value']} times this month.",
+        f"Habit Building: On average, each member visited {avg_visits} times this month.",
         f"Batch Popularity: The '{batch_analysis.iloc[0]['Batch'] if not batch_analysis.empty else 'N/A'}' batch had the highest footfall.",
         f"Peak Activity: {kpis.iloc[4]['Value']} saw the most activity across the month."
     ]
@@ -169,8 +181,13 @@ def plot_charts(analytics, tmpdir):
     fig, ax = plt.subplots(figsize=(8, 4))
     bars = ax.bar(dow["DayOfWeek"], dow["Attendance"], color=CHART_RED)
     ax.set_title("Attendance by Day of Week", fontweight="bold")
-    for bar in bars: ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + dow["Attendance"].max()*0.02, str(int(bar.get_height())), ha="center", va="bottom")
-    plt.xticks(rotation=20)
+    
+    # Hide top and right spines for a cleaner look
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    for bar in bars: ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + dow["Attendance"].max()*0.02, str(int(bar.get_height())), ha="center", va="bottom", fontweight="bold")
+    plt.xticks(rotation=0)  # Straight text if possible
     plt.tight_layout()
     dow_path = os.path.join(tmpdir, "dow.png")
     plt.savefig(dow_path, dpi=150)
@@ -178,9 +195,13 @@ def plot_charts(analytics, tmpdir):
 
     daily = analytics["daily_totals"]
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(daily["ShortDate"], daily["Attendance"], marker="o", color=CHART_RED)
+    ax.plot(daily["ShortDate"], daily["Attendance"], marker="o", color=CHART_RED, linewidth=2)
     ax.set_title("Daily Attendance Trend", fontweight="bold")
-    for x, y in zip(daily["ShortDate"], daily["Attendance"]): ax.text(x, y + daily["Attendance"].max()*0.02, str(int(y)), ha="center")
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    
+    for x, y in zip(daily["ShortDate"], daily["Attendance"]): ax.text(x, y + daily["Attendance"].max()*0.02, str(int(y)), ha="center", fontsize=8)
     plt.xticks(rotation=45)
     plt.tight_layout()
     trend_path = os.path.join(tmpdir, "trend.png")
@@ -190,38 +211,127 @@ def plot_charts(analytics, tmpdir):
 
 def make_pdf_table(df, headers, widths):
     tbl = Table([headers] + df.astype(str).values.tolist(), colWidths=widths, repeatRows=1)
-    tbl.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), BRAND_RED), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("GRID", (0,0), (-1,-1), 0.4, colors.gray), ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]), ("FONTSIZE", (0,0), (-1,-1), 8.5), ("ALIGN", (1,0), (-1,-1), "CENTER")]))
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), BRAND_RED), 
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0,0), (-1,0), 8),
+        ("TOPPADDING", (0,0), (-1,0), 8),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey), 
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]), 
+        ("FONTSIZE", (0,0), (-1,-1), 8.5), 
+        ("ALIGN", (1,0), (-1,-1), "CENTER"),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE")
+    ]))
     return tbl
 
 def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(name="T", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, textColor=BRAND_DARK)
-    sec_style = ParagraphStyle(name="S", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, textColor=BRAND_DARK, spaceBefore=6)
+    
+    # Custom PDF Styles for Professional Look
+    title_style = ParagraphStyle(name="ReportTitle", fontName="Helvetica-Bold", fontSize=20, textColor=BRAND_DARK, spaceAfter=2)
+    subtitle_style = ParagraphStyle(name="ReportSubtitle", fontName="Helvetica", fontSize=12, textColor=BRAND_GREY, spaceAfter=15)
+    
+    section_style = ParagraphStyle(
+        name="SectionHeader",
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        textColor=colors.white,
+        backColor=BRAND_RED,
+        spaceBefore=15,
+        spaceAfter=10,
+        borderPadding=(4, 6, 4, 6)
+    )
+    
+    bullet_style = ParagraphStyle(name="Bullet", parent=styles["BodyText"], leftIndent=15, spaceAfter=5, bulletIndent=5)
     
     doc = SimpleDocTemplate(out_pdf, pagesize=PAGE_SIZE, rightMargin=RIGHT_MARGIN, leftMargin=LEFT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN)
-    c = [Paragraph("ATTENDANCE ANALYSIS REPORT", title_style), Paragraph(meta.center_name, title_style), Spacer(1, 4*mm)]
+    c = []
     
-    kpi_t = Table([["Metric", "Value"]] + analytics["kpis"].astype(str).values.tolist(), colWidths=[90*mm, 50*mm])
-    kpi_t.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), BRAND_RED), ("TEXTCOLOR", (0,0), (-1,0), colors.white), ("GRID", (0,0), (-1,-1), 0.4, colors.gray)]))
-    c.extend([kpi_t, Spacer(1, 4*mm), Paragraph("Key Insights", sec_style)])
-    for ins in analytics["insights"]: c.append(Paragraph(f"• {ins}", styles["BodyText"]))
+    # Header Information
+    c.append(Paragraph(f"{meta.center_name} - Attendance Report", title_style))
+    c.append(Paragraph(f"Reporting Period: {meta.report_period}", subtitle_style))
+    c.append(Spacer(1, 2*mm))
 
-    c.extend([Paragraph("Attendance by Day of Week", sec_style), Image(charts["dow"], width=160*mm, height=75*mm), PageBreak()])
-    c.extend([Paragraph("Daily Attendance Trend", sec_style), Image(charts["trend"], width=160*mm, height=75*mm), Spacer(1, 4*mm)])
+    # SECTION 1: Executive Summary
+    c.append(Paragraph("1. Executive Summary", section_style))
+    
+    # Better KPI Table
+    kpi_data = [["Metric", "Value"]] + analytics["kpis"].astype(str).values.tolist()
+    kpi_t = Table(kpi_data, colWidths=[100*mm, 60*mm])
+    kpi_t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), 
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]),
+        ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"), # Bold metric names
+        ("ALIGN", (1,0), (1,-1), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6)
+    ]))
+    c.append(kpi_t)
+    c.append(Spacer(1, 6*mm))
+    
+    # Insights
+    c.append(Paragraph("Key Monthly Insights:", ParagraphStyle(name="Sub", fontName="Helvetica-Bold", spaceAfter=6)))
+    for ins in analytics["insights"]: 
+        c.append(Paragraph(f"• {ins}", bullet_style))
 
-    w1 = Table([[make_pdf_table(analytics["top_attendees"].head(8), ["Top Attendees", "Batch", "Visits"], [45*mm, 30*mm, 17*mm]), make_pdf_table(analytics["least_active"].head(8), ["Least Active", "Batch", "Visits"], [45*mm, 30*mm, 17*mm])]])
+    c.append(Spacer(1, 8*mm))
+
+    # SECTION 2: Attendance Trends
+    c.append(Paragraph("2. Attendance Trends", section_style))
+    c.append(Image(charts["dow"], width=165*mm, height=75*mm))
+    c.append(Spacer(1, 4*mm))
+    c.append(Image(charts["trend"], width=165*mm, height=75*mm))
+    
+    c.append(PageBreak())
+
+    # SECTION 3: Member Insights
+    c.append(Paragraph("3. Member Insights & Demographics", section_style))
+    c.append(Spacer(1, 2*mm))
+    
+    w1 = Table([[
+        make_pdf_table(analytics["top_attendees"].head(10), ["Top Attendees", "Batch", "Visits"], [48*mm, 30*mm, 17*mm]), 
+        make_pdf_table(analytics["least_active"].head(10), ["Least Active", "Batch", "Visits"], [48*mm, 30*mm, 17*mm])
+    ]])
     w1.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
-    w2 = Table([[make_pdf_table(analytics["segment_counts"], ["Segment", "Count"], [65*mm, 27*mm]), make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [55*mm, 18*mm, 19*mm])]])
+    w2 = Table([[
+        make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [68*mm, 27*mm]), 
+        make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [58*mm, 18*mm, 19*mm])
+    ]])
     w2.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
-    c.extend([w1, Spacer(1, 4*mm), w2])
+    c.extend([w1, Spacer(1, 8*mm), w2])
     
-    def footer(canvas, doc):
+    # Custom Page Setup for Header/Footer
+    def draw_page_setup(canvas, doc):
+        canvas.saveState()
+        
+        # Logo Logic
         if logo and os.path.exists(logo):
-            try: canvas.drawImage(logo, A4[0]-RIGHT_MARGIN-28*mm, A4[1]-TOP_MARGIN+2*mm, width=28*mm, height=18*mm, preserveAspectRatio=True, mask='auto')
-            except: pass
-    doc.build(c, onFirstPage=footer, onLaterPages=footer)
+            try: 
+                canvas.drawImage(logo, A4[0]-RIGHT_MARGIN-28*mm, A4[1]-18*mm, width=28*mm, height=14*mm, preserveAspectRatio=True, mask='auto')
+            except: 
+                pass
+                
+        # Footer Divider Line
+        canvas.setStrokeColor(BRAND_RED)
+        canvas.setLineWidth(1)
+        canvas.line(LEFT_MARGIN, BOTTOM_MARGIN - 5*mm, A4[0] - RIGHT_MARGIN, BOTTOM_MARGIN - 5*mm)
+        
+        # Footer Text
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(BRAND_GREY)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        canvas.drawString(LEFT_MARGIN, BOTTOM_MARGIN - 10*mm, f"Generated automatically on {timestamp}")
+        canvas.drawRightString(A4[0] - RIGHT_MARGIN, BOTTOM_MARGIN - 10*mm, f"Page {doc.page}")
+        
+        canvas.restoreState()
+
+    doc.build(c, onFirstPage=draw_page_setup, onLaterPages=draw_page_setup)
 
 def write_excel_report(out_xlsx, meta, df, analytics, charts):
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
@@ -257,17 +367,26 @@ st.set_page_config(page_title="Yoga Center Reports", page_icon="🧘", layout="c
 st.title("🧘 Yoga Center Attendance Dashboard")
 st.markdown("Upload your monthly attendance Excel file to instantly generate your Manager PDF Dashboard and Excel Audit file.")
 
-uploaded_file = st.file_uploader("1. Upload Attendance Excel (.xlsx)", type=["xlsx"])
+uploaded_file = st.file_uploader("1. Upload Attendance Excel (.xlsx, .csv)", type=["xlsx", "csv"])
 uploaded_logo = st.file_uploader("2. (Optional) Upload Center Logo (.png, .jpg)", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
     if st.button("Generate Reports ⚙️", type="primary", use_container_width=True):
         with st.spinner("Crunching numbers and building reports..."):
             try:
-                # Create a secure temporary workspace for the current user
+                # Create a secure temporary workspace
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    in_path = os.path.join(tmpdir, "input.xlsx")
-                    with open(in_path, "wb") as f: f.write(uploaded_file.getvalue())
+                    # Detect if CSV or Excel based on filename
+                    if uploaded_file.name.endswith('.csv'):
+                        in_path = os.path.join(tmpdir, "input.csv")
+                        with open(in_path, "wb") as f: f.write(uploaded_file.getvalue())
+                        # If the user uploads a CSV directly, use pandas to read and save it as an Excel immediately so find_header_row doesn't break
+                        df_temp = pd.read_csv(in_path, header=None)
+                        in_path = os.path.join(tmpdir, "input.xlsx")
+                        df_temp.to_excel(in_path, index=False, header=False)
+                    else:
+                        in_path = os.path.join(tmpdir, "input.xlsx")
+                        with open(in_path, "wb") as f: f.write(uploaded_file.getvalue())
 
                     logo_path = None
                     if uploaded_logo:
@@ -284,7 +403,7 @@ if uploaded_file is not None:
                     build_pdf(pdf_path, meta, analytics, charts, logo_path)
                     write_excel_report(xlsx_path, meta, df, analytics, charts)
 
-                    # Read generated files into memory for user download
+                    # Read generated files into memory
                     with open(pdf_path, "rb") as f: pdf_bytes = f.read()
                     with open(xlsx_path, "rb") as f: xlsx_bytes = f.read()
 

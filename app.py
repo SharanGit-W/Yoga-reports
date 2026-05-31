@@ -31,7 +31,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 # =============================================================================
 PAGE_SIZE = A4
 LEFT_MARGIN, RIGHT_MARGIN = 14 * mm, 14 * mm
-TOP_MARGIN, BOTTOM_MARGIN = 20 * mm, 20 * mm  # Increased for header/footer space
+TOP_MARGIN, BOTTOM_MARGIN = 20 * mm, 20 * mm
 
 BRAND_RED = colors.HexColor("#8A1E1E")
 BRAND_DARK = colors.HexColor("#222222")
@@ -49,7 +49,7 @@ class ReportMeta:
     month_key: str
 
 # =============================================================================
-# Core Logic (Updated with Strict Logic & Duplicate Handling)
+# Core Logic
 # =============================================================================
 def safe_str(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
@@ -81,7 +81,6 @@ def find_header_row(path: str) -> int:
     raise ValueError("Could not find header row containing 'SlNo' and 'StudentId'.")
 
 def attendance_cell_to_bool(series: pd.Series) -> pd.Series:
-    # STRICT LOGIC: Force string conversion and strictly check for explicit present markers.
     s = series.astype(str).str.strip().str.lower()
     return s.isin({"present", "p", "x", "1", "yes", "y", "true"})
 
@@ -100,10 +99,8 @@ def read_and_clean(input_file: str):
     raw = pd.read_excel(input_file, header=header_row)
     raw.columns = [normalize_col(c) for c in raw.columns]
     
-    # Remove entirely empty rows
     raw = raw.dropna(how="all")
     
-    # DUPLICATE HANDLING: Ensure StudentId exists, sort by data richness, and drop duplicates cleanly
     if "StudentId" in raw.columns:
         raw = raw.dropna(subset=["StudentId"])
         raw['data_points'] = raw.notna().sum(axis=1)
@@ -158,6 +155,15 @@ def build_analytics(df, date_cols, date_index, presence):
     top_attendees = df[["StudentName", "Batch", "Present_Count_Calc"]].sort_values(["Present_Count_Calc", "StudentName"], ascending=[False, True]).reset_index(drop=True)
     least_active = df[["StudentName", "Batch", "Present_Count_Calc"]].sort_values(["Present_Count_Calc", "StudentName"], ascending=[True, True]).reset_index(drop=True)
 
+    # PAGE 2 ENHANCEMENTS: Weekly & Peak Analytics
+    daily_totals["WeekOfMonth"] = ((daily_totals["Date"].dt.day - 1) // 7) + 1
+    weekly_totals = daily_totals.groupby("WeekOfMonth", as_index=False)["Attendance"].sum()
+    weekly_totals["Week"] = "Week " + weekly_totals["WeekOfMonth"].astype(str)
+    weekly_totals = weekly_totals[["Week", "Attendance"]]
+    
+    busiest_week = weekly_totals.loc[weekly_totals['Attendance'].idxmax()]
+    peak_day_row = daily_totals.loc[daily_totals['Attendance'].idxmax()]
+
     total_att = int(daily_totals["Attendance"].sum())
     avg_visits = round(total_att/max(1, len(df)), 1)
     kpis = pd.DataFrame({
@@ -170,8 +176,13 @@ def build_analytics(df, date_cols, date_index, presence):
         f"Batch Popularity: The '{batch_analysis.iloc[0]['Batch'] if not batch_analysis.empty else 'N/A'}' batch had the highest footfall.",
         f"Peak Activity: {kpis.iloc[4]['Value']} saw the most activity across the month."
     ]
+    
+    op_insights = [
+        f"Highest Single Day: The center saw its peak daily footfall on {peak_day_row['ShortDate']} with {peak_day_row['Attendance']} recorded visits.",
+        f"Busiest Period: {busiest_week['Week']} was the most active operational period, capturing {busiest_week['Attendance']} total visits.",
+    ]
 
-    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights}
+    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "weekly_totals": weekly_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights, "op_insights": op_insights}
 
 # =============================================================================
 # Plotting & Reporting Builders
@@ -182,12 +193,11 @@ def plot_charts(analytics, tmpdir):
     bars = ax.bar(dow["DayOfWeek"], dow["Attendance"], color=CHART_RED)
     ax.set_title("Attendance by Day of Week", fontweight="bold")
     
-    # Hide top and right spines for a cleaner look
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
     for bar in bars: ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + dow["Attendance"].max()*0.02, str(int(bar.get_height())), ha="center", va="bottom", fontweight="bold")
-    plt.xticks(rotation=0)  # Straight text if possible
+    plt.xticks(rotation=0)
     plt.tight_layout()
     dow_path = os.path.join(tmpdir, "dow.png")
     plt.savefig(dow_path, dpi=150)
@@ -228,9 +238,9 @@ def make_pdf_table(df, headers, widths):
 def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     styles = getSampleStyleSheet()
     
-    # Custom PDF Styles for Professional Look
-    title_style = ParagraphStyle(name="ReportTitle", fontName="Helvetica-Bold", fontSize=20, textColor=BRAND_DARK, spaceAfter=2)
-    subtitle_style = ParagraphStyle(name="ReportSubtitle", fontName="Helvetica", fontSize=12, textColor=BRAND_GREY, spaceAfter=15)
+    # FIXED: Added explicit leading to prevent heading overlaps (Issue #1)
+    title_style = ParagraphStyle(name="ReportTitle", fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=BRAND_DARK, spaceAfter=6)
+    subtitle_style = ParagraphStyle(name="ReportSubtitle", fontName="Helvetica", fontSize=12, leading=14, textColor=BRAND_GREY, spaceAfter=18)
     
     section_style = ParagraphStyle(
         name="SectionHeader",
@@ -248,15 +258,12 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     doc = SimpleDocTemplate(out_pdf, pagesize=PAGE_SIZE, rightMargin=RIGHT_MARGIN, leftMargin=LEFT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN)
     c = []
     
-    # Header Information
     c.append(Paragraph(f"{meta.center_name} - Attendance Report", title_style))
     c.append(Paragraph(f"Reporting Period: {meta.report_period}", subtitle_style))
     c.append(Spacer(1, 2*mm))
 
-    # SECTION 1: Executive Summary
     c.append(Paragraph("1. Executive Summary", section_style))
     
-    # Better KPI Table
     kpi_data = [["Metric", "Value"]] + analytics["kpis"].astype(str).values.tolist()
     kpi_t = Table(kpi_data, colWidths=[100*mm, 60*mm])
     kpi_t.setStyle(TableStyle([
@@ -265,7 +272,7 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
         ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]),
-        ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"), # Bold metric names
+        ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"),
         ("ALIGN", (1,0), (1,-1), "CENTER"),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
         ("TOPPADDING", (0,0), (-1,-1), 6)
@@ -273,14 +280,12 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     c.append(kpi_t)
     c.append(Spacer(1, 6*mm))
     
-    # Insights
     c.append(Paragraph("Key Monthly Insights:", ParagraphStyle(name="Sub", fontName="Helvetica-Bold", spaceAfter=6)))
     for ins in analytics["insights"]: 
         c.append(Paragraph(f"• {ins}", bullet_style))
 
     c.append(Spacer(1, 8*mm))
 
-    # SECTION 2: Attendance Trends
     c.append(Paragraph("2. Attendance Trends", section_style))
     c.append(Image(charts["dow"], width=165*mm, height=75*mm))
     c.append(Spacer(1, 4*mm))
@@ -288,7 +293,7 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     
     c.append(PageBreak())
 
-    # SECTION 3: Member Insights
+    # PAGE 2
     c.append(Paragraph("3. Member Insights & Demographics", section_style))
     c.append(Spacer(1, 2*mm))
     
@@ -306,27 +311,49 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     
     c.extend([w1, Spacer(1, 8*mm), w2])
     
+    # ENHANCEMENT: Filling Page 2 with Useful Analytics (Issue #3)
+    c.append(Spacer(1, 8*mm))
+    c.append(Paragraph("4. Operational Highlights", section_style))
+    c.append(Spacer(1, 2*mm))
+    
+    for op_ins in analytics["op_insights"]: 
+        c.append(Paragraph(f"• {op_ins}", bullet_style))
+    c.append(Spacer(1, 6*mm))
+    
+    # Render Weekly Performance Table to finish the page nicely
+    week_table_data = [["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist()
+    week_t = Table(week_table_data, colWidths=[80*mm, 60*mm])
+    week_t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), 
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]),
+        ("ALIGN", (1,0), (1,-1), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6)
+    ]))
+    c.append(week_t)
+
     # Custom Page Setup for Header/Footer
     def draw_page_setup(canvas, doc):
         canvas.saveState()
         
-        # Logo Logic
         if logo and os.path.exists(logo):
             try: 
                 canvas.drawImage(logo, A4[0]-RIGHT_MARGIN-28*mm, A4[1]-18*mm, width=28*mm, height=14*mm, preserveAspectRatio=True, mask='auto')
             except: 
                 pass
                 
-        # Footer Divider Line
         canvas.setStrokeColor(BRAND_RED)
         canvas.setLineWidth(1)
         canvas.line(LEFT_MARGIN, BOTTOM_MARGIN - 5*mm, A4[0] - RIGHT_MARGIN, BOTTOM_MARGIN - 5*mm)
         
-        # Footer Text
-        canvas.setFont("Helvetica", 8)
+        canvas.setFont("Helvetica", 9)
         canvas.setFillColor(BRAND_GREY)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        canvas.drawString(LEFT_MARGIN, BOTTOM_MARGIN - 10*mm, f"Generated automatically on {timestamp}")
+        
+        # FIXED: Footer now displays static Organization Name instead of Timestamp (Issue #2)
+        canvas.drawString(LEFT_MARGIN, BOTTOM_MARGIN - 10*mm, "Quality and Systems, Rashtrotthana Parishat")
         canvas.drawRightString(A4[0] - RIGHT_MARGIN, BOTTOM_MARGIN - 10*mm, f"Page {doc.page}")
         
         canvas.restoreState()
@@ -336,9 +363,10 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
 def write_excel_report(out_xlsx, meta, df, analytics, charts):
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
         analytics["kpis"].to_excel(writer, sheet_name="Summary", index=False, startrow=4)
-        pd.DataFrame({"Insight": analytics["insights"]}).to_excel(writer, sheet_name="Summary", index=False, startrow=4 + len(analytics["kpis"]) + 3)
+        pd.DataFrame({"Insight": analytics["insights"] + analytics["op_insights"]}).to_excel(writer, sheet_name="Summary", index=False, startrow=4 + len(analytics["kpis"]) + 3)
         analytics["segment_counts"].to_excel(writer, sheet_name="Member_Segments", index=False)
         analytics["batch_analysis"].to_excel(writer, sheet_name="Batch_Analysis", index=False)
+        analytics["weekly_totals"].to_excel(writer, sheet_name="Weekly_Trends", index=False) # Added weekly data to Excel
         analytics["daily_totals"].to_excel(writer, sheet_name="Daily_Attendance", index=False)
         analytics["dow_totals"].to_excel(writer, sheet_name="Day_of_Week", index=False)
         analytics["top_attendees"].head(50).to_excel(writer, sheet_name="Top_Attendees", index=False)
@@ -374,13 +402,10 @@ if uploaded_file is not None:
     if st.button("Generate Reports ⚙️", type="primary", use_container_width=True):
         with st.spinner("Crunching numbers and building reports..."):
             try:
-                # Create a secure temporary workspace
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    # Detect if CSV or Excel based on filename
                     if uploaded_file.name.endswith('.csv'):
                         in_path = os.path.join(tmpdir, "input.csv")
                         with open(in_path, "wb") as f: f.write(uploaded_file.getvalue())
-                        # If the user uploads a CSV directly, use pandas to read and save it as an Excel immediately so find_header_row doesn't break
                         df_temp = pd.read_csv(in_path, header=None)
                         in_path = os.path.join(tmpdir, "input.xlsx")
                         df_temp.to_excel(in_path, index=False, header=False)
@@ -396,20 +421,17 @@ if uploaded_file is not None:
                     pdf_path = os.path.join(tmpdir, "Report.pdf")
                     xlsx_path = os.path.join(tmpdir, "Audit.xlsx")
 
-                    # Execute pipeline
                     df, date_cols, date_idx, meta, presence = read_and_clean(in_path)
                     analytics = build_analytics(df, date_cols, date_idx, presence)
                     charts = plot_charts(analytics, tmpdir)
                     build_pdf(pdf_path, meta, analytics, charts, logo_path)
                     write_excel_report(xlsx_path, meta, df, analytics, charts)
 
-                    # Read generated files into memory
                     with open(pdf_path, "rb") as f: pdf_bytes = f.read()
                     with open(xlsx_path, "rb") as f: xlsx_bytes = f.read()
 
                 st.success(f"✅ Success! Generated reports for {meta.center_name} ({meta.report_month})")
                 
-                # Render side-by-side download buttons
                 col1, col2 = st.columns(2)
                 with col1:
                     st.download_button(

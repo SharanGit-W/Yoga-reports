@@ -72,6 +72,16 @@ def clean_center_name(raw_center: str) -> str:
         if lower.replace(" ", "") == k.replace(" ", ""): return v.upper()
     return txt.upper()
 
+def clean_batch_name(raw_name: str) -> str:
+    """Removes redundant word doubling found in raw datasets."""
+    txt = safe_str(raw_name)
+    txt = re.sub(r'(?i)(general)\s+general', r'\1', txt)
+    txt = re.sub(r'(?i)(therapy)\s+therapy', r'\1', txt)
+    txt = re.sub(r'(?i)(junior)\s+junior', r'\1', txt)
+    txt = re.sub(r'(?i)(senior)\s+senior', r'\1', txt)
+    txt = re.sub(r'(?i)children\s*yoga.*children\s*yoga.*', 'Children Yoga (WE)', txt)
+    return txt.strip()
+
 def find_header_row(path: str) -> int:
     wb = load_workbook(path, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
@@ -123,8 +133,11 @@ def read_and_clean(input_file: str):
     date_index = pd.DatetimeIndex([date_index[i] for i in sort_idx])
 
     df = raw.copy()
-    for col in ["Batch", "Center", "Status", "StudentName", "StudentId"]:
+    for col in ["Center", "Status", "StudentName", "StudentId"]:
         if col in df.columns: df[col] = df[col].map(safe_str)
+        
+    if "Batch" in df.columns:
+        df["Batch"] = df["Batch"].apply(clean_batch_name)
 
     presence = pd.DataFrame({c: attendance_cell_to_bool(df[c]) for c in date_cols}, index=df.index)
     df["Present_Count_Calc"] = presence.sum(axis=1).astype(int)
@@ -204,18 +217,27 @@ def plot_charts(analytics, tmpdir):
 
     daily = analytics["daily_totals"]
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(daily["ShortDate"], daily["Attendance"], marker="o", color=CHART_RED, linewidth=2)
+    
+    # Anti-Clutter X-Axis Formatting
+    day_numbers = daily["Date"].dt.strftime("%d")
+    
+    ax.plot(day_numbers, daily["Attendance"], marker="o", color=CHART_RED, linewidth=2)
     ax.set_title("Daily Attendance Trend", fontweight="bold")
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.grid(axis='y', linestyle='--', alpha=0.5)
     
-    for x, y in zip(daily["ShortDate"], daily["Attendance"]): ax.text(x, y + daily["Attendance"].max()*0.02, str(int(y)), ha="center", fontsize=8)
-    plt.xticks(rotation=45)
+    for x, y in zip(day_numbers, daily["Attendance"]): ax.text(x, y + daily["Attendance"].max()*0.02, str(int(y)), ha="center", fontsize=8)
+    
+    # Show only every 2nd day horizontally
+    ax.set_xticks(day_numbers[::2])
+    plt.xticks(rotation=0)
+    
     plt.tight_layout()
     trend_path = os.path.join(tmpdir, "trend.png")
     plt.savefig(trend_path, dpi=150)
     plt.close(fig)
+    
     return {"dow": dow_path, "trend": trend_path}
 
 def make_pdf_table(df, headers, widths):
@@ -253,7 +275,6 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     
     bullet_style = ParagraphStyle(name="Bullet", parent=styles["BodyText"], leftIndent=15, spaceAfter=5, bulletIndent=5)
     
-    # FIXED: Added the `title` parameter to properly name the browser tab (Issue #1)
     doc = SimpleDocTemplate(
         out_pdf, 
         pagesize=PAGE_SIZE, 
@@ -265,7 +286,6 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     )
     c = []
     
-    # --- PAGE 1: EXECUTIVE SUMMARY ---
     c.append(Paragraph(f"{meta.center_name} - Attendance Report", title_style))
     c.append(Paragraph(f"Reporting Period: {meta.report_period}", subtitle_style))
     c.append(Spacer(1, 2*mm))
@@ -294,15 +314,12 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
 
     c.append(Spacer(1, 8*mm))
 
-    # --- SECTION 2: MERGED TRENDS & HIGHLIGHTS ---
     c.append(Paragraph("2. Attendance Trends & Highlights", section_style))
     
-    # Brought the Operational Highlights into Section 2 to save space (Issue #2)
     for op_ins in analytics["op_insights"]: 
         c.append(Paragraph(f"• {op_ins}", bullet_style))
     c.append(Spacer(1, 4*mm))
     
-    # Weekly Table embedded here
     week_table_data = [["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist()
     week_t = Table(week_table_data, colWidths=[80*mm, 60*mm])
     week_t.setStyle(TableStyle([
@@ -318,32 +335,36 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     c.append(week_t)
     c.append(Spacer(1, 6*mm))
     
-    # Shrink chart heights slightly so they fit comfortably without spilling over
     c.append(Image(charts["dow"], width=160*mm, height=70*mm))
     c.append(Spacer(1, 4*mm))
     c.append(Image(charts["trend"], width=160*mm, height=70*mm))
     
     c.append(PageBreak())
 
-    # --- PAGE 2: MEMBER INSIGHTS ---
     c.append(Paragraph("3. Member Insights & Demographics", section_style))
     c.append(Spacer(1, 2*mm))
     
+    # Truncate student names specifically for the PDF tables to prevent column collision
+    top_disp = analytics["top_attendees"].head(10).copy()
+    top_disp["StudentName"] = top_disp["StudentName"].apply(lambda x: (x[:14] + '..') if len(str(x)) > 16 else x)
+    
+    least_disp = analytics["least_active"].head(10).copy()
+    least_disp["StudentName"] = least_disp["StudentName"].apply(lambda x: (x[:14] + '..') if len(str(x)) > 16 else x)
+
     w1 = Table([[
-        make_pdf_table(analytics["top_attendees"].head(10), ["Top Attendees", "Batch", "Visits"], [48*mm, 30*mm, 17*mm]), 
-        make_pdf_table(analytics["least_active"].head(10), ["Least Active", "Batch", "Visits"], [48*mm, 30*mm, 17*mm])
+        make_pdf_table(top_disp, ["Top Attendees", "Batch", "Visits"], [45*mm, 32*mm, 17*mm]), 
+        make_pdf_table(least_disp, ["Least Active", "Batch", "Visits"], [45*mm, 32*mm, 17*mm])
     ]])
     w1.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
     w2 = Table([[
-        make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [68*mm, 27*mm]), 
-        make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [58*mm, 18*mm, 19*mm])
+        make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [67*mm, 27*mm]), 
+        make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [57*mm, 18*mm, 19*mm])
     ]])
     w2.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
     c.extend([w1, Spacer(1, 8*mm), w2])
 
-    # Custom Page Setup for Header/Footer
     def draw_page_setup(canvas, doc):
         canvas.saveState()
         

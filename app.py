@@ -155,7 +155,6 @@ def build_analytics(df, date_cols, date_index, presence):
     top_attendees = df[["StudentName", "Batch", "Present_Count_Calc"]].sort_values(["Present_Count_Calc", "StudentName"], ascending=[False, True]).reset_index(drop=True)
     least_active = df[["StudentName", "Batch", "Present_Count_Calc"]].sort_values(["Present_Count_Calc", "StudentName"], ascending=[True, True]).reset_index(drop=True)
 
-    # PAGE 2 ENHANCEMENTS: Weekly & Peak Analytics
     daily_totals["WeekOfMonth"] = ((daily_totals["Date"].dt.day - 1) // 7) + 1
     weekly_totals = daily_totals.groupby("WeekOfMonth", as_index=False)["Attendance"].sum()
     weekly_totals["Week"] = "Week " + weekly_totals["WeekOfMonth"].astype(str)
@@ -238,7 +237,6 @@ def make_pdf_table(df, headers, widths):
 def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     styles = getSampleStyleSheet()
     
-    # FIXED: Added explicit leading to prevent heading overlaps (Issue #1)
     title_style = ParagraphStyle(name="ReportTitle", fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=BRAND_DARK, spaceAfter=6)
     subtitle_style = ParagraphStyle(name="ReportSubtitle", fontName="Helvetica", fontSize=12, leading=14, textColor=BRAND_GREY, spaceAfter=18)
     
@@ -255,9 +253,19 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     
     bullet_style = ParagraphStyle(name="Bullet", parent=styles["BodyText"], leftIndent=15, spaceAfter=5, bulletIndent=5)
     
-    doc = SimpleDocTemplate(out_pdf, pagesize=PAGE_SIZE, rightMargin=RIGHT_MARGIN, leftMargin=LEFT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN)
+    # FIXED: Added the `title` parameter to properly name the browser tab (Issue #1)
+    doc = SimpleDocTemplate(
+        out_pdf, 
+        pagesize=PAGE_SIZE, 
+        rightMargin=RIGHT_MARGIN, 
+        leftMargin=LEFT_MARGIN, 
+        topMargin=TOP_MARGIN, 
+        bottomMargin=BOTTOM_MARGIN,
+        title=f"{meta.center_name} - Attendance Report"
+    )
     c = []
     
+    # --- PAGE 1: EXECUTIVE SUMMARY ---
     c.append(Paragraph(f"{meta.center_name} - Attendance Report", title_style))
     c.append(Paragraph(f"Reporting Period: {meta.report_period}", subtitle_style))
     c.append(Spacer(1, 2*mm))
@@ -286,14 +294,38 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
 
     c.append(Spacer(1, 8*mm))
 
-    c.append(Paragraph("2. Attendance Trends", section_style))
-    c.append(Image(charts["dow"], width=165*mm, height=75*mm))
+    # --- SECTION 2: MERGED TRENDS & HIGHLIGHTS ---
+    c.append(Paragraph("2. Attendance Trends & Highlights", section_style))
+    
+    # Brought the Operational Highlights into Section 2 to save space (Issue #2)
+    for op_ins in analytics["op_insights"]: 
+        c.append(Paragraph(f"• {op_ins}", bullet_style))
     c.append(Spacer(1, 4*mm))
-    c.append(Image(charts["trend"], width=165*mm, height=75*mm))
+    
+    # Weekly Table embedded here
+    week_table_data = [["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist()
+    week_t = Table(week_table_data, colWidths=[80*mm, 60*mm])
+    week_t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), 
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]),
+        ("ALIGN", (1,0), (1,-1), "CENTER"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6)
+    ]))
+    c.append(week_t)
+    c.append(Spacer(1, 6*mm))
+    
+    # Shrink chart heights slightly so they fit comfortably without spilling over
+    c.append(Image(charts["dow"], width=160*mm, height=70*mm))
+    c.append(Spacer(1, 4*mm))
+    c.append(Image(charts["trend"], width=160*mm, height=70*mm))
     
     c.append(PageBreak())
 
-    # PAGE 2
+    # --- PAGE 2: MEMBER INSIGHTS ---
     c.append(Paragraph("3. Member Insights & Demographics", section_style))
     c.append(Spacer(1, 2*mm))
     
@@ -310,30 +342,6 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
     w2.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
     c.extend([w1, Spacer(1, 8*mm), w2])
-    
-    # ENHANCEMENT: Filling Page 2 with Useful Analytics (Issue #3)
-    c.append(Spacer(1, 8*mm))
-    c.append(Paragraph("4. Operational Highlights", section_style))
-    c.append(Spacer(1, 2*mm))
-    
-    for op_ins in analytics["op_insights"]: 
-        c.append(Paragraph(f"• {op_ins}", bullet_style))
-    c.append(Spacer(1, 6*mm))
-    
-    # Render Weekly Performance Table to finish the page nicely
-    week_table_data = [["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist()
-    week_t = Table(week_table_data, colWidths=[80*mm, 60*mm])
-    week_t.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), 
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]),
-        ("ALIGN", (1,0), (1,-1), "CENTER"),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("TOPPADDING", (0,0), (-1,-1), 6)
-    ]))
-    c.append(week_t)
 
     # Custom Page Setup for Header/Footer
     def draw_page_setup(canvas, doc):
@@ -352,7 +360,6 @@ def build_pdf(out_pdf, meta, analytics, charts, logo=None):
         canvas.setFont("Helvetica", 9)
         canvas.setFillColor(BRAND_GREY)
         
-        # FIXED: Footer now displays static Organization Name instead of Timestamp (Issue #2)
         canvas.drawString(LEFT_MARGIN, BOTTOM_MARGIN - 10*mm, "Quality and Systems, Rashtrotthana Parishat")
         canvas.drawRightString(A4[0] - RIGHT_MARGIN, BOTTOM_MARGIN - 10*mm, f"Page {doc.page}")
         
@@ -366,7 +373,7 @@ def write_excel_report(out_xlsx, meta, df, analytics, charts):
         pd.DataFrame({"Insight": analytics["insights"] + analytics["op_insights"]}).to_excel(writer, sheet_name="Summary", index=False, startrow=4 + len(analytics["kpis"]) + 3)
         analytics["segment_counts"].to_excel(writer, sheet_name="Member_Segments", index=False)
         analytics["batch_analysis"].to_excel(writer, sheet_name="Batch_Analysis", index=False)
-        analytics["weekly_totals"].to_excel(writer, sheet_name="Weekly_Trends", index=False) # Added weekly data to Excel
+        analytics["weekly_totals"].to_excel(writer, sheet_name="Weekly_Trends", index=False)
         analytics["daily_totals"].to_excel(writer, sheet_name="Daily_Attendance", index=False)
         analytics["dow_totals"].to_excel(writer, sheet_name="Day_of_Week", index=False)
         analytics["top_attendees"].head(50).to_excel(writer, sheet_name="Top_Attendees", index=False)

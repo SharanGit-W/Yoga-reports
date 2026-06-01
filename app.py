@@ -36,6 +36,7 @@ BRAND_GREY = colors.HexColor("#666666")
 BRAND_LIGHT = colors.HexColor("#F9F9F9")
 CHART_RED = "#8A1E1E"
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 class ReportValidationError(Exception):
     pass
@@ -46,6 +47,7 @@ class ReportMeta:
     report_month: str
     report_period: str
     month_key: str
+    date_start: datetime
 
 def safe_str(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
@@ -77,9 +79,11 @@ def clean_batch_name(raw_name: str) -> str:
     txt = re.sub(r'(?i)children\s*yoga.*children\s*yoga.*', 'Children Yoga', txt)
     return txt.strip()
 
-def extract_numeric_id(val: str) -> str:
-    match = re.search(r'(\d+)$', str(val).strip())
-    v = match.group(1) if match else str(val).strip()
+def extract_numeric_id(val) -> str:
+    s = str(val).strip()
+    if s.endswith('.0'): s = s[:-2]
+    match = re.search(r'(\d+)$', s)
+    v = match.group(1) if match else s
     return v.lstrip('0') or '0'
 
 def find_header_row(path: str, target_cols: list) -> int:
@@ -104,7 +108,7 @@ def extract_metadata(raw: pd.DataFrame) -> str:
                     if any(k in v.lower() for k in ["vijayanagar", "sadashivanagar", "jayanagar", "rysri", "gayathri"]): return v
     return ""
 
-def read_fee_report(input_file: str) -> Tuple[set, dict]:
+def read_fee_report(input_file: str) -> pd.DataFrame:
     header_row = find_header_row(input_file, ["stud id", "stud name", "mobile no"])
     if header_row == -1: raise ReportValidationError("Could not locate the header row in the Fee Report. Please ensure it contains 'Stud ID'.")
         
@@ -114,23 +118,44 @@ def read_fee_report(input_file: str) -> Tuple[set, dict]:
     id_col = next((c for c in raw.columns if "stud id" in c.lower() or "student id" in c.lower()), None)
     status_col = next((c for c in raw.columns if "status" in c.lower()), None)
     mobile_col = next((c for c in raw.columns if "mobile" in c.lower()), None)
+    particulars_col = next((c for c in raw.columns if "particulars" in c.lower()), None)
+    pymt_dt_col = next((c for c in raw.columns if "pymt dt" in c.lower() or "payment date" in c.lower()), None)
     
     if not id_col or not status_col: raise ReportValidationError("Fee report missing required columns ('Stud ID' or 'Status').")
         
-    all_mobiles = {}
+    fee_records = []
     for idx, row in raw.iterrows():
         val_id = row[id_col]
         if pd.notna(val_id):
             num_id = extract_numeric_id(val_id)
-            mobile = row[mobile_col] if mobile_col and pd.notna(row[mobile_col]) else "N/A"
-            if isinstance(mobile, float):
-                try: mobile = str(int(mobile))
-                except: mobile = "N/A"
-            all_mobiles[num_id] = str(mobile).strip()
+            status = safe_str(row[status_col]).lower()
             
-    active_mask = raw[status_col].astype(str).str.strip().str.lower() == "active"
-    active_ids = set(extract_numeric_id(x) for x in raw.loc[active_mask, id_col].dropna())
-    return active_ids, all_mobiles
+            mobile = "N/A"
+            if mobile_col and pd.notna(row[mobile_col]):
+                m = row[mobile_col]
+                if isinstance(m, float): 
+                    try: mobile = str(int(m))
+                    except: mobile = "N/A"
+                else: 
+                    mobile = str(m).strip()
+                    
+            particulars = safe_str(row[particulars_col]) if particulars_col and pd.notna(row[particulars_col]) else ""
+            
+            pymt_dt = None
+            if pymt_dt_col and pd.notna(row[pymt_dt_col]):
+                try:
+                    pymt_dt = pd.to_datetime(row[pymt_dt_col])
+                except:
+                    pymt_dt = None
+                    
+            fee_records.append({
+                "Norm_ID": num_id,
+                "Status": status,
+                "Mobile": mobile,
+                "Particulars": particulars,
+                "Pymt_Dt": pymt_dt
+            })
+    return pd.DataFrame(fee_records)
 
 def read_and_clean(input_file: str):
     wb = load_workbook(input_file, data_only=True, read_only=True)
@@ -167,7 +192,6 @@ def read_and_clean(input_file: str):
             date_cols.append(c)
             date_index.append(dt)
         else:
-            # Fallback for formats like 5/1/26
             dt2 = pd.to_datetime(c, errors="coerce")
             if pd.notna(dt2):
                 date_cols.append(c)
@@ -190,10 +214,65 @@ def read_and_clean(input_file: str):
     
     center_raw = df["Center"].mode().iloc[0] if "Center" in df.columns and df["Center"].str.strip().ne("").any() else extract_metadata(raw)
     date_start, date_end = date_index.min(), date_index.max()
-    meta = ReportMeta(center_name=clean_center_name(center_raw), report_month=date_start.strftime("%B %Y"), report_period=f"{date_start.strftime('%d-%b-%Y')} to {date_end.strftime('%d-%b-%Y')}", month_key=date_start.strftime("%b_%Y"))
+    meta = ReportMeta(
+        center_name=clean_center_name(center_raw), 
+        report_month=date_start.strftime("%B %Y"), 
+        report_period=f"{date_start.strftime('%d-%b-%Y')} to {date_end.strftime('%d-%b-%Y')}", 
+        month_key=date_start.strftime("%b_%Y"),
+        date_start=date_start
+    )
     return df, date_cols, date_index, meta, presence
 
-def build_analytics(df, date_cols, date_index, presence, active_paid_ids=None, all_mobiles=None):
+def reconcile_fees(df: pd.DataFrame, fee_df: pd.DataFrame, target_month_tag_regex: str):
+    if fee_df.empty:
+        return set(), df, pd.DataFrame()
+        
+    active_fees = fee_df[fee_df['Status'] == 'active'].copy()
+    
+    active_fees['Covers_Target_Month'] = active_fees['Particulars'].str.contains(target_month_tag_regex, case=False, na=False, regex=True)
+    valid_fees = active_fees[active_fees['Covers_Target_Month']].copy()
+    
+    valid_fees = valid_fees.sort_values(by='Pymt_Dt', ascending=False, na_position='last')
+    latest_valid_fees = valid_fees.drop_duplicates(subset=['Norm_ID'], keep='first')
+    
+    paid_ids = set(latest_valid_fees['Norm_ID'].tolist())
+    
+    all_active_fees_sorted = active_fees.sort_values(by='Pymt_Dt', ascending=False, na_position='last')
+    latest_any_fees = all_active_fees_sorted.drop_duplicates(subset=['Norm_ID'], keep='first')
+    
+    mobile_map = latest_any_fees.set_index('Norm_ID')['Mobile'].to_dict()
+    pymt_dt_map = latest_any_fees.set_index('Norm_ID')['Pymt_Dt'].to_dict()
+    coverage_map = latest_any_fees.set_index('Norm_ID')['Particulars'].to_dict()
+    
+    df['Mobile No'] = df['System_ID'].map(mobile_map).fillna("No Record")
+    
+    def format_date(d):
+        if pd.isna(d) or d is None: return "Never"
+        return d.strftime("%d-%b-%Y")
+        
+    df['Last Payment Date'] = df['System_ID'].map(pymt_dt_map).apply(format_date)
+    
+    def extract_coverage(s):
+        if not s: return "None"
+        months = re.findall(r'\[.*?\]', s)
+        return ", ".join(months) if months else "None"
+        
+    df['Subscription Coverage'] = df['System_ID'].map(coverage_map).fillna("").apply(extract_coverage)
+    
+    attended_mask = df['Present_Count_Calc'] > 0
+    not_paid_mask = ~df['System_ID'].isin(paid_ids)
+    pending_students = df[attended_mask & not_paid_mask].copy()
+    
+    cols_to_keep = ['StudentName', 'System_ID', 'Present_Count_Calc', 'Mobile No', 'Last Payment Date', 'Subscription Coverage']
+    if 'Status' in pending_students.columns:
+        cols_to_keep.insert(2, 'Status')
+        
+    pending_students = pending_students[cols_to_keep].sort_values(by='Present_Count_Calc', ascending=False).reset_index(drop=True)
+    pending_students.rename(columns={'Present_Count_Calc': 'Days Attended'}, inplace=True)
+    
+    return paid_ids, df, pending_students
+
+def build_analytics(df, date_cols, date_index, presence, fee_df=None, meta=None):
     daily_totals = pd.DataFrame({"Date": date_index, "Attendance": presence.sum(axis=0).values.astype(int)})
     daily_totals["DayOfWeek"] = daily_totals["Date"].dt.day_name()
     daily_totals["ShortDate"] = daily_totals["Date"].dt.strftime("%d-%b")
@@ -226,30 +305,30 @@ def build_analytics(df, date_cols, date_index, presence, active_paid_ids=None, a
     pending_students = pd.DataFrame()
     fee_summary_text = ""
     
-    if active_paid_ids is not None:
-        attended_mask = df['Present_Count_Calc'] > 0
-        not_paid_mask = ~df['System_ID'].isin(active_paid_ids)
-        pending_students = df[attended_mask & not_paid_mask].copy()
+    if fee_df is not None and not fee_df.empty and meta is not None:
+        month_str = MONTH_ABBR[meta.date_start.month-1]
+        year_str = meta.date_start.strftime('%y')
+        target_month_tag_regex = rf"{month_str}[\s\-/]*{year_str}"
         
-        if all_mobiles: pending_students['Mobile No'] = pending_students['System_ID'].map(all_mobiles).fillna("No Data Available")
-        else: pending_students['Mobile No'] = "No Data Available"
-            
-        cols_to_keep = ['StudentName', 'System_ID', 'Present_Count_Calc', 'Mobile No']
-        if 'Status' in pending_students.columns:
-            cols_to_keep.insert(2, 'Status')
-            
-        pending_students = pending_students[cols_to_keep].sort_values(by='Present_Count_Calc', ascending=False).reset_index(drop=True)
-        pending_students.rename(columns={'Present_Count_Calc': 'Days Attended'}, inplace=True)
+        paid_ids, df, pending_students = reconcile_fees(df, fee_df, target_month_tag_regex)
+        
+        total_attending = len(df[df['Present_Count_Calc'] > 0])
+        total_unpaid = len(pending_students)
+        
+        if total_attending > 0:
+            unpaid_ratio = total_unpaid / total_attending
+            if unpaid_ratio > 0.70:
+                raise ReportValidationError(f"Data Anomaly Detected: {int(unpaid_ratio*100)}% of attending students are flagged as unpaid. This exceeds the 70% safety threshold and indicates a potential ID mismatch or missing fee data. Please verify the input files.")
         
         total_pending_visits = int(pending_students['Days Attended'].sum()) if not pending_students.empty else 0
         total_pending_individuals = len(pending_students)
         
         if total_pending_individuals > 0:
-            fee_summary_text = f"A total of {total_pending_individuals} students attended classes without an active fee subscription, accumulating {total_pending_visits} attendance days."
+            fee_summary_text = f"A total of {total_pending_individuals} students attended classes without an active fee subscription for {month_str} {year_str}, accumulating {total_pending_visits} attendance days."
         else:
-            fee_summary_text = "Fee Status: Excellent. All attending students currently have active subscriptions."
+            fee_summary_text = f"Fee Status: Excellent. All attending students currently have active subscriptions covering {month_str} {year_str}."
 
-    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "weekly_totals": weekly_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights, "op_insights": op_insights, "pending_students": pending_students, "fee_summary_text": fee_summary_text}
+    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "weekly_totals": weekly_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights, "op_insights": op_insights, "pending_students": pending_students, "fee_summary_text": fee_summary_text, "df": df}
 
 def plot_charts(analytics, tmpdir):
     dow = analytics["dow_totals"]
@@ -368,14 +447,14 @@ def build_pdf(out_pdf, meta, analytics, charts):
             def_disp = analytics["pending_students"].copy()
             def_disp["StudentName"] = def_disp["StudentName"].apply(lambda x: (x[:16] + '..') if len(str(x)) > 18 else x)
             
-            cols = ['StudentName', 'System_ID', 'Days Attended', 'Mobile No']
-            headers = ["Student Name", "Student ID", "Days Attended", "Mobile No"]
-            widths = [45*mm, 35*mm, 35*mm, 45*mm]
+            cols = ['StudentName', 'System_ID', 'Days Attended', 'Mobile No', 'Last Payment Date', 'Subscription Coverage']
+            headers = ["Student Name", "Student ID", "Days Attended", "Mobile No", "Last Payment", "Coverage"]
+            widths = [35*mm, 25*mm, 20*mm, 30*mm, 25*mm, 37*mm]
             
             if 'Status' in def_disp.columns:
                 cols.insert(2, 'Status')
                 headers.insert(2, "Status")
-                widths = [40*mm, 30*mm, 25*mm, 25*mm, 40*mm]
+                widths = [32*mm, 22*mm, 18*mm, 18*mm, 28*mm, 22*mm, 32*mm]
 
             c.append(make_pdf_table(def_disp[cols], headers, widths))
 
@@ -410,7 +489,7 @@ def write_excel_report(out_xlsx, meta, df, analytics, charts):
         analytics["dow_totals"].to_excel(writer, sheet_name="Day_of_Week", index=False)
         analytics["top_attendees"].head(50).to_excel(writer, sheet_name="Top_Attendees", index=False)
         analytics["least_active"].head(50).to_excel(writer, sheet_name="Least_Active", index=False)
-        df.drop(columns=['System_ID']).to_excel(writer, sheet_name="Clean_Data", index=False)
+        df.drop(columns=['System_ID'], errors='ignore').to_excel(writer, sheet_name="Clean_Data", index=False)
         
     wb = load_workbook(out_xlsx)
     for ws in wb.worksheets:
@@ -444,7 +523,7 @@ if uploaded_att is not None:
                         att_path = os.path.join(tmpdir, "input.xlsx")
                         with open(att_path, "wb") as f: f.write(uploaded_att.getvalue())
 
-                    active_paid_ids = None; all_mobiles = None
+                    fee_df = None
                     if uploaded_fee:
                         if uploaded_fee.name.endswith('.csv'):
                             fee_path = os.path.join(tmpdir, "fee.csv")
@@ -454,11 +533,14 @@ if uploaded_att is not None:
                         else:
                             fee_path = os.path.join(tmpdir, "fee.xlsx")
                             with open(fee_path, "wb") as f: f.write(uploaded_fee.getvalue())
-                        active_paid_ids, all_mobiles = read_fee_report(fee_path)
+                        fee_df = read_fee_report(fee_path)
 
                     pdf_path = os.path.join(tmpdir, "Report.pdf"); xlsx_path = os.path.join(tmpdir, "Audit.xlsx")
                     df, date_cols, date_idx, meta, presence = read_and_clean(att_path)
-                    analytics = build_analytics(df, date_cols, date_idx, presence, active_paid_ids, all_mobiles)
+                    analytics = build_analytics(df, date_cols, date_idx, presence, fee_df, meta)
+                    
+                    df = analytics["df"]
+                    
                     charts = plot_charts(analytics, tmpdir)
                     build_pdf(pdf_path, meta, analytics, charts)
                     write_excel_report(xlsx_path, meta, df, analytics, charts)
@@ -466,7 +548,7 @@ if uploaded_att is not None:
                     with open(pdf_path, "rb") as f: pdf_bytes = f.read()
                     with open(xlsx_path, "rb") as f: xlsx_bytes = f.read()
 
-                success_msg = f"✅ Success! Standard reports generated for {meta.center_name}." if active_paid_ids is None else f"✅ Success! Advanced Attendance & Fee Reconciliation reports generated for {meta.center_name}."
+                success_msg = f"✅ Success! Standard reports generated for {meta.center_name}." if fee_df is None else f"✅ Success! Advanced Attendance & Fee Reconciliation reports generated for {meta.center_name}."
                 st.success(success_msg)
                 
                 col1, col2 = st.columns(2)

@@ -13,7 +13,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # Required for running Matplotlib on a web server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from openpyxl import load_workbook
@@ -26,9 +26,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 
-# =============================================================================
-# Configuration & Data Models
-# =============================================================================
 PAGE_SIZE = A4
 LEFT_MARGIN, RIGHT_MARGIN = 14 * mm, 14 * mm
 TOP_MARGIN, BOTTOM_MARGIN = 20 * mm, 20 * mm
@@ -41,7 +38,6 @@ CHART_RED = "#8A1E1E"
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 class ReportValidationError(Exception):
-    """Custom exception for graceful UI error handling."""
     pass
 
 @dataclass
@@ -51,9 +47,6 @@ class ReportMeta:
     report_period: str
     month_key: str
 
-# =============================================================================
-# Core Logic
-# =============================================================================
 def safe_str(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
 
@@ -70,7 +63,7 @@ def clean_center_name(raw_center: str) -> str:
     if "-" in txt: txt = txt.split("-", 1)[-1].strip()
     txt = re.sub(r"\s*\(.*?\)\s*", "", txt).strip()
     lower = txt.lower()
-    replacements = {"vijayanagar(blore)": "Vijayanagara", "vijayanagar": "Vijayanagara", "sadashivanagar": "Sadashivanagara"}
+    replacements = {"vijayanagar(blore)": "Vijayanagara", "vijayanagar": "Vijayanagara", "sadashivanagar": "Sadashivanagara", "gayathri nagar": "Gayathri Nagar", "gyn": "Gayathri Nagar"}
     for k, v in replacements.items():
         if lower.replace(" ", "") == k.replace(" ", ""): return v.upper()
     return txt.upper()
@@ -85,7 +78,6 @@ def clean_batch_name(raw_name: str) -> str:
     return txt.strip()
 
 def extract_numeric_id(val: str) -> str:
-    """Extracts strictly the numeric digits from mixed ID strings for perfect matching."""
     match = re.search(r'(\d+)$', str(val).strip())
     v = match.group(1) if match else str(val).strip()
     return v.lstrip('0') or '0'
@@ -95,8 +87,7 @@ def find_header_row(path: str, target_cols: list) -> int:
     ws = wb[wb.sheetnames[0]]
     for r in range(1, min(30, ws.max_row) + 1):
         values = [safe_str(ws.cell(r, c).value).lower() for c in range(1, min(ws.max_column, 25) + 1)]
-        if any(t.lower() in values for t in target_cols):
-            return r - 1
+        if any(t.lower() in values for t in target_cols): return r - 1
     return -1
 
 def attendance_cell_to_bool(series: pd.Series) -> pd.Series:
@@ -107,17 +98,15 @@ def extract_metadata(raw: pd.DataFrame) -> str:
     for _, row in raw.head(5).iterrows():
         vals = [safe_str(v) for v in row.tolist()[:6]]
         joined = " | ".join(v for v in vals if v)
-        if any(k in joined.lower() for k in ["vijayanagar", "sadashivanagar", "jayanagar", "rysri"]):
+        if any(k in joined.lower() for k in ["vijayanagar", "sadashivanagar", "jayanagar", "rysri", "gayathri"]):
             for v in vals:
                 if v and not re.search(r"^\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}$", v):
-                    if any(k in v.lower() for k in ["vijayanagar", "sadashivanagar", "jayanagar", "rysri"]): return v
+                    if any(k in v.lower() for k in ["vijayanagar", "sadashivanagar", "jayanagar", "rysri", "gayathri"]): return v
     return ""
 
 def read_fee_report(input_file: str) -> Tuple[set, dict]:
-    """Parses Fee Report to return a set of active IDs and a dictionary mapping all IDs to Mobile Numbers."""
     header_row = find_header_row(input_file, ["stud id", "stud name", "mobile no"])
-    if header_row == -1:
-        raise ReportValidationError("Could not locate the header row in the Fee Report. Please ensure it contains 'Stud ID'.")
+    if header_row == -1: raise ReportValidationError("Could not locate the header row in the Fee Report. Please ensure it contains 'Stud ID'.")
         
     raw = pd.read_excel(input_file, header=header_row)
     raw.columns = [str(c).strip() for c in raw.columns]
@@ -126,8 +115,7 @@ def read_fee_report(input_file: str) -> Tuple[set, dict]:
     status_col = next((c for c in raw.columns if "status" in c.lower()), None)
     mobile_col = next((c for c in raw.columns if "mobile" in c.lower()), None)
     
-    if not id_col or not status_col:
-        raise ReportValidationError("Fee report missing required columns ('Stud ID' or 'Status'). Generating standard attendance report instead.")
+    if not id_col or not status_col: raise ReportValidationError("Fee report missing required columns ('Stud ID' or 'Status').")
         
     all_mobiles = {}
     for idx, row in raw.iterrows():
@@ -135,32 +123,25 @@ def read_fee_report(input_file: str) -> Tuple[set, dict]:
         if pd.notna(val_id):
             num_id = extract_numeric_id(val_id)
             mobile = row[mobile_col] if mobile_col and pd.notna(row[mobile_col]) else "N/A"
-            
-            # Safely handle float conversions for phone numbers (e.g. 9876543210.0)
             if isinstance(mobile, float):
                 try: mobile = str(int(mobile))
                 except: mobile = "N/A"
-                
             all_mobiles[num_id] = str(mobile).strip()
             
     active_mask = raw[status_col].astype(str).str.strip().str.lower() == "active"
     active_ids = set(extract_numeric_id(x) for x in raw.loc[active_mask, id_col].dropna())
-        
     return active_ids, all_mobiles
 
 def read_and_clean(input_file: str):
-    # Swapped file protection
     wb = load_workbook(input_file, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
     sample_text = ""
-    for r in range(1, min(10, ws.max_row) + 1):
-        sample_text += " ".join([safe_str(ws.cell(r, c).value).lower() for c in range(1, min(ws.max_column, 20) + 1)])
+    for r in range(1, min(10, ws.max_row) + 1): sample_text += " ".join([safe_str(ws.cell(r, c).value).lower() for c in range(1, min(ws.max_column, 20) + 1)])
     if "admission fee" in sample_text or "subscription fees" in sample_text:
         raise ReportValidationError("Oops! It looks like you uploaded the Fee Report in the Attendance slot. Please swap them.")
     
     header_row = find_header_row(input_file, ["studentname", "studentid", "slno"])
-    if header_row == -1: 
-        raise ReportValidationError("Invalid Attendance File format. Could not find 'StudentId' or 'StudentName' headers.")
+    if header_row == -1: raise ReportValidationError("Invalid Attendance File format. Could not find 'StudentId' or 'StudentName' headers.")
     
     raw = pd.read_excel(input_file, header=header_row)
     raw.columns = [normalize_col(c) for c in raw.columns]
@@ -173,21 +154,26 @@ def read_and_clean(input_file: str):
         raw = raw.drop(columns=['data_points'])
 
     raw = raw.reset_index(drop=True)
-    if len(raw) == 0:
-        raise ReportValidationError("No valid student records found after cleaning the attendance data.")
+    if len(raw) == 0: raise ReportValidationError("No valid student records found after cleaning the attendance data.")
         
-    status_idx = raw.columns.get_loc("Status")
+    status_idx = raw.columns.get_loc("Status") if "Status" in raw.columns else -1
     date_cols, date_index = [], []
     
-    for c in raw.columns[status_idx + 1:]:
+    start_col = status_idx + 1 if status_idx != -1 else 0
+    for c in raw.columns[start_col:]:
         if safe_str(c).strip().lower() in {"present", "absent"}: continue
         dt = pd.to_datetime(c, format="%d-%b-%Y", errors="coerce")
         if pd.notna(dt):
             date_cols.append(c)
             date_index.append(dt)
+        else:
+            # Fallback for formats like 5/1/26
+            dt2 = pd.to_datetime(c, errors="coerce")
+            if pd.notna(dt2):
+                date_cols.append(c)
+                date_index.append(dt2)
 
-    if not date_cols:
-        raise ReportValidationError("No valid attendance dates were found in this file. Please check the date formatting.")
+    if not date_cols: raise ReportValidationError("No valid attendance dates were found in this file. Please check the date formatting.")
 
     sort_idx = np.argsort(pd.to_datetime(date_index))
     date_cols = [date_cols[i] for i in sort_idx]
@@ -196,25 +182,15 @@ def read_and_clean(input_file: str):
     df = raw.copy()
     for col in ["Center", "Status", "StudentName", "StudentId"]:
         if col in df.columns: df[col] = df[col].map(safe_str)
-        
-    if "Batch" in df.columns:
-        df["Batch"] = df["Batch"].apply(clean_batch_name)
+    if "Batch" in df.columns: df["Batch"] = df["Batch"].apply(clean_batch_name)
 
     presence = pd.DataFrame({c: attendance_cell_to_bool(df[c]) for c in date_cols}, index=df.index)
     df["Present_Count_Calc"] = presence.sum(axis=1).astype(int)
-    
-    # Bridge ID for Fee Comparison
     df["System_ID"] = df["StudentId"].apply(extract_numeric_id)
     
     center_raw = df["Center"].mode().iloc[0] if "Center" in df.columns and df["Center"].str.strip().ne("").any() else extract_metadata(raw)
     date_start, date_end = date_index.min(), date_index.max()
-
-    meta = ReportMeta(
-        center_name=clean_center_name(center_raw),
-        report_month=date_start.strftime("%B %Y"),
-        report_period=f"{date_start.strftime('%d-%b-%Y')} to {date_end.strftime('%d-%b-%Y')}",
-        month_key=date_start.strftime("%b_%Y")
-    )
+    meta = ReportMeta(center_name=clean_center_name(center_raw), report_month=date_start.strftime("%B %Y"), report_period=f"{date_start.strftime('%d-%b-%Y')} to {date_end.strftime('%d-%b-%Y')}", month_key=date_start.strftime("%b_%Y"))
     return df, date_cols, date_index, meta, presence
 
 def build_analytics(df, date_cols, date_index, presence, active_paid_ids=None, all_mobiles=None):
@@ -242,71 +218,46 @@ def build_analytics(df, date_cols, date_index, presence, active_paid_ids=None, a
 
     total_att = int(daily_totals["Attendance"].sum())
     avg_visits = round(total_att/max(1, len(df)), 1)
-    kpis = pd.DataFrame({
-        "Metric": ["Registered Members", "Operating Days", "Total Center Visits", "Avg Visits per Member", "Busiest Day"],
-        "Value": [len(df), len(date_cols), total_att, avg_visits, dow_totals.loc[dow_totals['Attendance'].idxmax(), 'DayOfWeek']]
-    })
+    kpis = pd.DataFrame({"Metric": ["Registered Members", "Operating Days", "Total Center Visits", "Avg Visits per Member", "Busiest Day"], "Value": [len(df), len(date_cols), total_att, avg_visits, dow_totals.loc[dow_totals['Attendance'].idxmax(), 'DayOfWeek']]})
     
-    insights = [
-        f"Habit Building: On average, each member visited {avg_visits} times this month.",
-        f"Batch Popularity: The '{batch_analysis.iloc[0]['Batch'] if not batch_analysis.empty else 'N/A'}' batch had the highest footfall.",
-        f"Peak Activity: {kpis.iloc[4]['Value']} saw the most activity across the month."
-    ]
+    insights = [f"Habit Building: On average, each member visited {avg_visits} times this month.", f"Batch Popularity: The '{batch_analysis.iloc[0]['Batch'] if not batch_analysis.empty else 'N/A'}' batch had the highest footfall.", f"Peak Activity: {kpis.iloc[4]['Value']} saw the most activity across the month."]
+    op_insights = [f"Highest Single Day: The center saw its peak daily footfall on {peak_day_row['ShortDate']} with {peak_day_row['Attendance']} recorded visits.", f"Busiest Period: {busiest_week['Week']} was the most active operational period, capturing {busiest_week['Attendance']} total visits."]
     
-    op_insights = [
-        f"Highest Single Day: The center saw its peak daily footfall on {peak_day_row['ShortDate']} with {peak_day_row['Attendance']} recorded visits.",
-        f"Busiest Period: {busiest_week['Week']} was the most active operational period, capturing {busiest_week['Attendance']} total visits.",
-    ]
-    
-    # REVENUE COMPLIANCE MODULE (Soft Language Implementation)
-    fee_kpis = None
     pending_students = pd.DataFrame()
-    fee_insights = []
+    fee_summary_text = ""
     
     if active_paid_ids is not None:
         attended_mask = df['Present_Count_Calc'] > 0
         not_paid_mask = ~df['System_ID'].isin(active_paid_ids)
-        
         pending_students = df[attended_mask & not_paid_mask].copy()
         
-        # Merge phone numbers using the phonebook
-        if all_mobiles:
-            pending_students['Mobile No'] = pending_students['System_ID'].map(all_mobiles).fillna("No Data Available")
-        else:
-            pending_students['Mobile No'] = "No Data Available"
+        if all_mobiles: pending_students['Mobile No'] = pending_students['System_ID'].map(all_mobiles).fillna("No Data Available")
+        else: pending_students['Mobile No'] = "No Data Available"
             
-        pending_students = pending_students[['StudentName', 'System_ID', 'Batch', 'Present_Count_Calc', 'Mobile No']].sort_values(by='Present_Count_Calc', ascending=False).reset_index(drop=True)
-        pending_students.rename(columns={'Present_Count_Calc': 'Classes Attended (Pending)'}, inplace=True)
+        cols_to_keep = ['StudentName', 'System_ID', 'Present_Count_Calc', 'Mobile No']
+        if 'Status' in pending_students.columns:
+            cols_to_keep.insert(2, 'Status')
+            
+        pending_students = pending_students[cols_to_keep].sort_values(by='Present_Count_Calc', ascending=False).reset_index(drop=True)
+        pending_students.rename(columns={'Present_Count_Calc': 'Days Attended'}, inplace=True)
         
-        total_pending_visits = pending_students['Classes Attended (Pending)'].sum() if not pending_students.empty else 0
-        total_paid_visits = total_att - total_pending_visits
+        total_pending_visits = int(pending_students['Days Attended'].sum()) if not pending_students.empty else 0
         total_pending_individuals = len(pending_students)
         
-        fee_kpis = pd.DataFrame({
-            "Metric": ["Active Subscription Visits", "Pending Renewal Visits", "Students Pending Renewal"],
-            "Value": [total_paid_visits, total_pending_visits, total_pending_individuals]
-        })
-        
         if total_pending_individuals > 0:
-            fee_insights.append(f"Pending Renewals: {total_pending_individuals} students attended a total of {total_pending_visits} classes while their fee renewal is pending.")
-            fee_insights.append(f"Active Ratio: {round((total_paid_visits/max(1, total_att))*100, 1)}% of total visits were backed by active subscriptions.")
+            fee_summary_text = f"A total of {total_pending_individuals} students attended classes without an active fee subscription, accumulating {total_pending_visits} attendance days."
         else:
-            fee_insights.append("Fee Status: Excellent. All attending students currently have active subscriptions.")
+            fee_summary_text = "Fee Status: Excellent. All attending students currently have active subscriptions."
 
-    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "weekly_totals": weekly_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights, "op_insights": op_insights, "fee_kpis": fee_kpis, "pending_students": pending_students, "fee_insights": fee_insights}
+    return {"presence": presence, "daily_totals": daily_totals, "dow_totals": dow_totals, "weekly_totals": weekly_totals, "batch_analysis": batch_analysis, "top_attendees": top_attendees, "least_active": least_active, "segment_counts": segment_counts, "kpis": kpis, "insights": insights, "op_insights": op_insights, "pending_students": pending_students, "fee_summary_text": fee_summary_text}
 
-# =============================================================================
-# Plotting & Reporting Builders
-# =============================================================================
 def plot_charts(analytics, tmpdir):
     dow = analytics["dow_totals"]
     fig, ax = plt.subplots(figsize=(8, 4))
     bars = ax.bar(dow["DayOfWeek"], dow["Attendance"], color=CHART_RED)
     ax.set_title("Attendance by Day of Week", fontweight="bold")
-    
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
     for bar in bars: ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + dow["Attendance"].max()*0.02, str(int(bar.get_height())), ha="center", va="bottom", fontweight="bold")
     plt.xticks(rotation=0)
     plt.tight_layout()
@@ -316,39 +267,28 @@ def plot_charts(analytics, tmpdir):
 
     daily = analytics["daily_totals"]
     fig, ax = plt.subplots(figsize=(8, 4))
-    
     day_numbers = daily["Date"].dt.strftime("%d")
     ax.plot(day_numbers, daily["Attendance"], marker="o", color=CHART_RED, linewidth=2)
     ax.set_title("Daily Attendance Trend", fontweight="bold")
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.grid(axis='y', linestyle='--', alpha=0.5)
-    
     for x, y in zip(day_numbers, daily["Attendance"]): ax.text(x, y + daily["Attendance"].max()*0.02, str(int(y)), ha="center", fontsize=8)
-    
     ax.set_xticks(day_numbers[::2])
     plt.xticks(rotation=0)
-    
     plt.tight_layout()
     trend_path = os.path.join(tmpdir, "trend.png")
     plt.savefig(trend_path, dpi=150)
     plt.close(fig)
-    
     return {"dow": dow_path, "trend": trend_path}
 
 def make_pdf_table(df, headers, widths):
     tbl = Table([headers] + df.astype(str).values.tolist(), colWidths=widths, repeatRows=1)
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), BRAND_RED), 
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0,0), (-1,0), 8),
-        ("TOPPADDING", (0,0), (-1,0), 8),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey), 
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]), 
-        ("FONTSIZE", (0,0), (-1,-1), 8.5), 
-        ("ALIGN", (1,0), (-1,-1), "CENTER"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE")
+        ("BACKGROUND", (0,0), (-1,0), BRAND_RED), ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("BOTTOMPADDING", (0,0), (-1,0), 8), ("TOPPADDING", (0,0), (-1,0), 8),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey), ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]), 
+        ("FONTSIZE", (0,0), (-1,-1), 8.5), ("ALIGN", (1,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE")
     ]))
     return tbl
 
@@ -356,11 +296,7 @@ def build_pdf(out_pdf, meta, analytics, charts):
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(name="ReportTitle", fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=BRAND_DARK, spaceAfter=6)
     subtitle_style = ParagraphStyle(name="ReportSubtitle", fontName="Helvetica", fontSize=12, leading=14, textColor=BRAND_GREY, spaceAfter=18)
-    
-    section_style = ParagraphStyle(
-        name="SectionHeader", fontName="Helvetica-Bold", fontSize=12, textColor=colors.white,
-        backColor=BRAND_RED, spaceBefore=15, spaceAfter=10, borderPadding=(4, 6, 4, 6)
-    )
+    section_style = ParagraphStyle(name="SectionHeader", fontName="Helvetica-Bold", fontSize=12, textColor=colors.white, backColor=BRAND_RED, spaceBefore=15, spaceAfter=10, borderPadding=(4, 6, 4, 6))
     bullet_style = ParagraphStyle(name="Bullet", parent=styles["BodyText"], leftIndent=15, spaceAfter=5, bulletIndent=5)
     
     doc = SimpleDocTemplate(out_pdf, pagesize=PAGE_SIZE, rightMargin=RIGHT_MARGIN, leftMargin=LEFT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN, title=f"{meta.center_name} - Attendance Report")
@@ -371,9 +307,7 @@ def build_pdf(out_pdf, meta, analytics, charts):
     c.append(Spacer(1, 2*mm))
 
     c.append(Paragraph("1. Executive Summary", section_style))
-    
-    kpi_data = [["Metric", "Value"]] + analytics["kpis"].astype(str).values.tolist()
-    kpi_t = Table(kpi_data, colWidths=[100*mm, 60*mm])
+    kpi_t = Table([["Metric", "Value"]] + analytics["kpis"].astype(str).values.tolist(), colWidths=[100*mm, 60*mm])
     kpi_t.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
@@ -391,8 +325,7 @@ def build_pdf(out_pdf, meta, analytics, charts):
     for op_ins in analytics["op_insights"]: c.append(Paragraph(f"• {op_ins}", bullet_style))
     c.append(Spacer(1, 4*mm))
     
-    week_table_data = [["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist()
-    week_t = Table(week_table_data, colWidths=[80*mm, 60*mm])
+    week_t = Table([["Weekly Operational Period", "Total Center Visits"]] + analytics["weekly_totals"].astype(str).values.tolist(), colWidths=[80*mm, 60*mm])
     week_t.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
@@ -405,7 +338,6 @@ def build_pdf(out_pdf, meta, analytics, charts):
     c.append(Image(charts["dow"], width=160*mm, height=70*mm))
     c.append(Spacer(1, 4*mm))
     c.append(Image(charts["trend"], width=160*mm, height=70*mm))
-    
     c.append(PageBreak())
 
     c.append(Paragraph("3. Member Insights & Demographics", section_style))
@@ -416,52 +348,36 @@ def build_pdf(out_pdf, meta, analytics, charts):
     least_disp = analytics["least_active"].head(10).copy()
     least_disp["StudentName"] = least_disp["StudentName"].apply(lambda x: (x[:14] + '..') if len(str(x)) > 16 else x)
 
-    w1 = Table([[
-        make_pdf_table(top_disp, ["Top Attendees", "Batch", "Visits"], [45*mm, 32*mm, 17*mm]), 
-        make_pdf_table(least_disp, ["Least Active", "Batch", "Visits"], [45*mm, 32*mm, 17*mm])
-    ]])
+    w1 = Table([[make_pdf_table(top_disp, ["Top Attendees", "Batch", "Visits"], [45*mm, 32*mm, 17*mm]), make_pdf_table(least_disp, ["Least Active", "Batch", "Visits"], [45*mm, 32*mm, 17*mm])]])
     w1.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
-    w2 = Table([[
-        make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [67*mm, 27*mm]), 
-        make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Users", "Visits"], ["Batch", "Users", "Visits"], [57*mm, 18*mm, 19*mm]])
-    ]] if False else [[
-        make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [67*mm, 27*mm]), 
-        make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [57*mm, 18*mm, 19*mm])
-    ]])
+    w2 = Table([[make_pdf_table(analytics["segment_counts"], ["Engagement Segment", "Count"], [67*mm, 27*mm]), make_pdf_table(analytics["batch_analysis"].head(5)[["Batch", "Members", "Total_Present"]], ["Batch", "Users", "Visits"], [57*mm, 18*mm, 19*mm])]])
     w2.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
     
     c.extend([w1, Spacer(1, 8*mm), w2])
     
-    # NEW: FEE STATUS & COMPLIANCE SECTION (Soft Language)
-    if analytics.get("fee_kpis") is not None:
+    if analytics.get("fee_summary_text"):
         c.append(Spacer(1, 8*mm))
-        c.append(Paragraph("4. Fee Status Overview", section_style))
-        c.append(Spacer(1, 2*mm))
+        c.append(Paragraph("4. Fee Reconciliation: Unpaid Attendees", section_style))
+        c.append(Spacer(1, 4*mm))
         
-        fee_kpi_data = [["Status Metric", "Value"]] + analytics["fee_kpis"].astype(str).values.tolist()
-        fee_kpi_t = Table(fee_kpi_data, colWidths=[100*mm, 60*mm])
-        fee_kpi_t.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), BRAND_DARK), ("TEXTCOLOR", (0,0), (-1,0), colors.white), 
-            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("GRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
-            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, BRAND_LIGHT]), ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"),
-            ("ALIGN", (1,0), (1,-1), "CENTER"), ("BOTTOMPADDING", (0,0), (-1,-1), 6), ("TOPPADDING", (0,0), (-1,-1), 6)
-        ]))
-        c.append(fee_kpi_t)
-        c.append(Spacer(1, 6*mm))
-        
-        for ins in analytics["fee_insights"]: c.append(Paragraph(f"• {ins}", bullet_style))
-        c.append(Spacer(1, 6*mm))
+        summary_style = ParagraphStyle(name="FeeSummary", fontName="Helvetica-Bold", fontSize=11, textColor=BRAND_DARK, spaceAfter=12)
+        c.append(Paragraph(analytics["fee_summary_text"], summary_style))
         
         if not analytics["pending_students"].empty:
-            c.append(Paragraph("Gentle Reminders Needed (Top Pending Renewals)", ParagraphStyle(name="Sub2", fontName="Helvetica-Bold", textColor=BRAND_DARK, spaceAfter=8)))
-            
-            def_disp = analytics["pending_students"].head(15).copy()
+            def_disp = analytics["pending_students"].copy()
             def_disp["StudentName"] = def_disp["StudentName"].apply(lambda x: (x[:16] + '..') if len(str(x)) > 18 else x)
             
-            # Creating a soft, neutral table for pending fees
-            def_t = make_pdf_table(def_disp[['StudentName', 'System_ID', 'Batch', 'Classes Attended (Pending)']], ["Student Name", "System ID", "Batch", "Pending Classes"], [50*mm, 35*mm, 45*mm, 30*mm])
-            c.append(def_t)
+            cols = ['StudentName', 'System_ID', 'Days Attended', 'Mobile No']
+            headers = ["Student Name", "Student ID", "Days Attended", "Mobile No"]
+            widths = [45*mm, 35*mm, 35*mm, 45*mm]
+            
+            if 'Status' in def_disp.columns:
+                cols.insert(2, 'Status')
+                headers.insert(2, "Status")
+                widths = [40*mm, 30*mm, 25*mm, 25*mm, 40*mm]
+
+            c.append(make_pdf_table(def_disp[cols], headers, widths))
 
     def draw_page_setup(canvas, doc):
         canvas.saveState()
@@ -481,15 +397,10 @@ def write_excel_report(out_xlsx, meta, df, analytics, charts):
         analytics["kpis"].to_excel(writer, sheet_name="Summary", index=False, startrow=4)
         
         all_insights = analytics["insights"] + analytics["op_insights"]
-        if analytics.get("fee_insights"): all_insights.extend(analytics["fee_insights"])
+        if analytics.get("fee_summary_text"): all_insights.append(analytics["fee_summary_text"])
         pd.DataFrame({"Insight": all_insights}).to_excel(writer, sheet_name="Summary", index=False, startrow=4 + len(analytics["kpis"]) + 3)
         
-        if analytics.get("fee_kpis") is not None:
-            fee_start = 4 + len(analytics["kpis"]) + 3 + len(all_insights) + 3
-            analytics["fee_kpis"].to_excel(writer, sheet_name="Summary", index=False, startrow=fee_start)
-        
-        # NEW: Front Desk Contact List (Soft language)
-        if analytics.get("fee_kpis") is not None and not analytics["pending_students"].empty:
+        if not analytics["pending_students"].empty:
             analytics["pending_students"].to_excel(writer, sheet_name="Pending_Renewals_List", index=False)
             
         analytics["segment_counts"].to_excel(writer, sheet_name="Member_Segments", index=False)
@@ -503,25 +414,18 @@ def write_excel_report(out_xlsx, meta, df, analytics, charts):
         
     wb = load_workbook(out_xlsx)
     for ws in wb.worksheets:
-        for c in ws[1]: c.font, c.fill, c.alignment = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="8A1E1E"), Alignment(horizontal="center")
+        for c_cell in ws[1]: c_cell.font, c_cell.fill, c_cell.alignment = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="8A1E1E"), Alignment(horizontal="center")
         ws.freeze_panes = "A2"
     ws = wb["Summary"]
     ws["A1"], ws["B1"], ws["A2"], ws["B2"], ws["A3"], ws["B3"] = "Center", meta.center_name, "Month", meta.report_month, "Period", meta.report_period
     for cell in ["A1", "A2", "A3"]: ws[cell].font = Font(bold=True)
-    
-    try:
-        ws.add_image(XLImage(charts["dow"]), "E2")
-        ws.add_image(XLImage(charts["trend"]), "E22")
+    try: ws.add_image(XLImage(charts["dow"]), "E2"); ws.add_image(XLImage(charts["trend"]), "E22")
     except: pass
     wb.save(out_xlsx)
 
-# =============================================================================
-# Streamlit Web UI
-# =============================================================================
 st.set_page_config(page_title="Yoga Center Operations Manager", page_icon="🧘", layout="centered")
-
 st.title("🧘 Yoga Center Operations Manager")
-st.markdown("Upload your monthly attendance to generate the standard report. **Upload the Fee Report alongside it to activate the Fee Status & Compliance checks.**")
+st.markdown("Upload your monthly attendance to generate the standard report. **Upload the Fee Report alongside it to activate the Fee Reconciliation checks.**")
 
 uploaded_att = st.file_uploader("1. Required: Upload Attendance Report (.xlsx, .csv)", type=["xlsx", "csv"])
 uploaded_fee = st.file_uploader("2. Optional: Upload Fee Report (.xlsx, .csv)", type=["xlsx", "csv"])
@@ -531,36 +435,28 @@ if uploaded_att is not None:
         with st.spinner("Crunching numbers and building reports..."):
             try:
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    
                     if uploaded_att.name.endswith('.csv'):
                         att_path = os.path.join(tmpdir, "input.csv")
                         with open(att_path, "wb") as f: f.write(uploaded_att.getvalue())
-                        df_temp = pd.read_csv(att_path, header=None)
+                        pd.read_csv(att_path, header=None).to_excel(os.path.join(tmpdir, "input.xlsx"), index=False, header=False)
                         att_path = os.path.join(tmpdir, "input.xlsx")
-                        df_temp.to_excel(att_path, index=False, header=False)
                     else:
                         att_path = os.path.join(tmpdir, "input.xlsx")
                         with open(att_path, "wb") as f: f.write(uploaded_att.getvalue())
 
-                    active_paid_ids = None
-                    all_mobiles = None
+                    active_paid_ids = None; all_mobiles = None
                     if uploaded_fee:
                         if uploaded_fee.name.endswith('.csv'):
                             fee_path = os.path.join(tmpdir, "fee.csv")
                             with open(fee_path, "wb") as f: f.write(uploaded_fee.getvalue())
-                            df_fee_temp = pd.read_csv(fee_path, header=None)
+                            pd.read_csv(fee_path, header=None).to_excel(os.path.join(tmpdir, "fee.xlsx"), index=False, header=False)
                             fee_path = os.path.join(tmpdir, "fee.xlsx")
-                            df_fee_temp.to_excel(fee_path, index=False, header=False)
                         else:
                             fee_path = os.path.join(tmpdir, "fee.xlsx")
                             with open(fee_path, "wb") as f: f.write(uploaded_fee.getvalue())
-                            
                         active_paid_ids, all_mobiles = read_fee_report(fee_path)
 
-                    pdf_path = os.path.join(tmpdir, "Report.pdf")
-                    xlsx_path = os.path.join(tmpdir, "Audit.xlsx")
-
-                    # Execute pipeline
+                    pdf_path = os.path.join(tmpdir, "Report.pdf"); xlsx_path = os.path.join(tmpdir, "Audit.xlsx")
                     df, date_cols, date_idx, meta, presence = read_and_clean(att_path)
                     analytics = build_analytics(df, date_cols, date_idx, presence, active_paid_ids, all_mobiles)
                     charts = plot_charts(analytics, tmpdir)
@@ -570,31 +466,14 @@ if uploaded_att is not None:
                     with open(pdf_path, "rb") as f: pdf_bytes = f.read()
                     with open(xlsx_path, "rb") as f: xlsx_bytes = f.read()
 
-                success_msg = f"✅ Success! Standard reports generated for {meta.center_name}."
-                if active_paid_ids is not None:
-                    success_msg = f"✅ Success! Advanced Attendance & Fee Status reports generated for {meta.center_name}."
+                success_msg = f"✅ Success! Standard reports generated for {meta.center_name}." if active_paid_ids is None else f"✅ Success! Advanced Attendance & Fee Reconciliation reports generated for {meta.center_name}."
                 st.success(success_msg)
                 
                 col1, col2 = st.columns(2)
-                with col1:
-                    st.download_button(
-                        label="📄 Download PDF Dashboard",
-                        data=pdf_bytes,
-                        file_name=f"{meta.center_name}_Report_{meta.month_key}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                with col2:
-                    st.download_button(
-                        label="📊 Download Excel Audit",
-                        data=xlsx_bytes,
-                        file_name=f"{meta.center_name}_Audit_{meta.month_key}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                with col1: st.download_button(label="📄 Download PDF Dashboard", data=pdf_bytes, file_name=f"{meta.center_name}_Report_{meta.month_key}.pdf", mime="application/pdf", use_container_width=True)
+                with col2: st.download_button(label="📊 Download Excel Audit", data=xlsx_bytes, file_name=f"{meta.center_name}_Audit_{meta.month_key}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             
-            except ReportValidationError as ve:
-                st.warning(f"⚠️ {str(ve)}")
+            except ReportValidationError as ve: st.warning(f"⚠️ {str(ve)}")
             except Exception as e:
-                st.error(f"❌ An error occurred while processing your files. Please ensure the files are in the correct format.")
+                st.error("❌ An error occurred. Please ensure the files are in the correct format.")
                 st.exception(e)

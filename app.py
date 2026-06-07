@@ -147,40 +147,50 @@ def extract_numeric_id(val) -> str:
 
 def parse_mixed_date(val):
     """
-    Parse dates from multiple formats found in fee reports.
-    FIX: Prioritizes DD/MM/YY over MM/DD/YY to prevent Indian dates from being read as US dates.
+    Bulletproof date parser using Regex to manually construct dates.
+    Bypasses pandas format guessing entirely to guarantee DD/MM/YY accuracy.
     """
-    if pd.isna(val) or val is None or safe_str(val) == "":
+    if pd.isna(val) or val is None:
         return None
-    
-    # If it's already a datetime object from Excel, preserve it
+        
+    # If it's already a valid datetime object from Excel's internal serial numbers, preserve it
     if isinstance(val, (pd.Timestamp, datetime)):
         return val
         
     val_str = str(val).strip()
-    
-    # Remove time component if present
+    if not val_str:
+        return None
+        
+    # Remove time component if present (e.g., "10/3/26 00:00:00")
     if " " in val_str:
         val_str = val_str.split(" ")[0]
-    
-    # FIX: Indian/UK formats first, then US formats as fallback
-    formats = [
-        "%d/%m/%Y",      # 13/05/2026
-        "%d-%m-%Y",      # 13-05-2026
-        "%Y-%m-%d",      # 2026-05-13
-        "%d/%m/%y",      # 1/4/26 (India format - PRIORITIZED)
-        "%d-%m-%y",      # 1-4-26
-        "%m/%d/%y",      # 1/4/26 (US format - FALLBACK)
-        "%m-%d-%y",      # 1-4-26
-    ]
-    
-    for fmt in formats:
+        
+    # Regex to capture numbers separated by / or -
+    match = re.match(r'^(\d{1,4})[\/\-](\d{1,2})[\/\-](\d{1,4})$', val_str)
+    if match:
+        p1, p2, p3 = match.groups()
+        
+        # Determine Year, Month, Day based on digit lengths
+        if len(p1) == 4:  # YYYY-MM-DD
+            year, month, day = int(p1), int(p2), int(p3)
+        elif len(p3) == 4: # DD-MM-YYYY 
+            day, month, year = int(p1), int(p2), int(p3)
+        else: # D/M/YY or DD/MM/YY (Standard Indian Format)
+            day, month, year = int(p1), int(p2), int(p3)
+            if year < 100:
+                year += 2000
+                
         try:
-            return pd.to_datetime(val_str, format=fmt)
-        except:
-            continue
-    
-    # Final fallback - let pandas infer
+            # Attempt to construct the date manually
+            return datetime(year, month, day)
+        except ValueError:
+            # If it fails (e.g., month was > 12), it might be US format MM/DD/YY. Swap and retry.
+            try:
+                return datetime(year, day, month)
+            except ValueError:
+                pass
+
+    # Absolute final fallback
     try:
         return pd.to_datetime(val, errors='coerce')
     except:

@@ -13,7 +13,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 )
-from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 
@@ -24,15 +23,23 @@ from reportlab.lib.units import mm
 def load_excel_smart(file_bytes, target_col):
     """
     Dynamically finds the header row containing the target column.
-    Handles spaces and varied casing gracefully.
+    Robust against title text above the actual table headers.
     """
-    df = pd.read_excel(file_bytes, header=None)
+    # Use engine='openpyxl' for xlsx files, fallback gracefully for csv/xls if needed
+    try:
+        df = pd.read_excel(file_bytes, header=None, engine="openpyxl")
+    except Exception:
+        # Fallback to default if it's an older format
+        file_bytes.seek(0)
+        df = pd.read_excel(file_bytes, header=None)
+        
     header_idx = 0
     target_clean = "".join(target_col.lower().split())
     
     for i, row in df.iterrows():
         row_str = " ".join([str(x).lower() for x in row if pd.notna(x)])
-        if target_col.lower() in row_str or target_clean in "".join(row_str.split()):
+        # Must find the target column AND the word "batch" to confirm it's the real header row
+        if (target_col.lower() in row_str or target_clean in "".join(row_str.split())) and "batch" in row_str:
             header_idx = i
             break
             
@@ -51,6 +58,8 @@ def normalize_batch(batch):
     if pd.isna(batch):
         return ""
     batch = str(batch).lower().strip()
+    # CRITICAL FIX: Handle batches like "General,General"
+    batch = batch.split(',')[0] 
     batch = batch.replace("batch", "")
     batch = re.sub(r'\s+y[gc]\b', '', batch)
     return " ".join(batch.split())
@@ -62,19 +71,28 @@ def parse_months(particulars: str):
         return []
     matches = re.findall(MONTH_REGEX, str(particulars), flags=re.IGNORECASE)
     cleaned = []
-    for month in matches:
+    for month_str in matches:
+        m_clean = month_str.replace(" ", "").replace("/", "-")
         try:
-            dt = pd.to_datetime(month)
+            # CRITICAL FIX: Explicitly enforce format so "May-26" isn't parsed as May 26th of the current year!
+            dt = pd.to_datetime(m_clean, format="%b-%y")
             cleaned.append(dt.strftime("%b-%y"))
-        except Exception:
-            month = month.replace(" ", "").replace("/", "-")
-            cleaned.append(month.title())
+        except ValueError:
+            try:
+                # Fallback for "Jan-2026"
+                dt = pd.to_datetime(m_clean)
+                cleaned.append(dt.strftime("%b-%y"))
+            except Exception:
+                cleaned.append(m_clean.title())
     return cleaned
 
 @st.cache_data
 def load_fee_data(file_bytes):
-    # Pass BytesIO so it caches smoothly
     fee = load_excel_smart(io.BytesIO(file_bytes), "Stud Name")
+    
+    # Safely check for columns ignoring trailing spaces
+    actual_cols = [str(c).strip() for c in fee.columns]
+    fee.columns = actual_cols
     
     required_columns = ["Stud Name", "Batch", "Status", "Particulars"]
     for col in required_columns:
@@ -119,6 +137,9 @@ def load_fee_data(file_bytes):
 def load_attendance_data(file_bytes):
     attendance = load_excel_smart(io.BytesIO(file_bytes), "StudentName")
     
+    actual_cols = [str(c).strip() for c in attendance.columns]
+    attendance.columns = actual_cols
+    
     required_columns = ["StudentName", "Batch"]
     for col in required_columns:
         if col not in attendance.columns:
@@ -132,11 +153,16 @@ def load_attendance_data(file_bytes):
     
     for col in attendance.columns:
         try:
-            col_str = str(col)
+            col_str = str(col).strip()
             if col_str.isdigit() or len(col_str) < 4:
                 continue
-            # Pre-compute dates so we don't calculate them thousands of times in the loop below
-            dt = pd.to_datetime(col_str)
+                
+            # Safely parse Excel columns ensuring "May-26" isn't misread
+            if isinstance(col, str) and re.match(r"^[A-Za-z]{3}-\d{2}$", col_str):
+                dt = pd.to_datetime(col_str, format="%b-%y")
+            else:
+                dt = pd.to_datetime(col)
+                
             date_columns.append(col)
             col_to_month_map[col] = dt.strftime("%b-%y")
         except Exception:
@@ -242,7 +268,9 @@ def build_pdf_report(defaulters, metrics):
 
     chart_buf = create_batch_chart(defaulters)
     story.append(Paragraph("Batch Summary", styles["Heading1"]))
-    story.append(Image(ImageReader(chart_buf), width=170 * mm, height=90 * mm))
+    
+    # CRITICAL FIX: Removed ImageReader wrapper to prevent Type Errors in newer ReportLab versions
+    story.append(Image(chart_buf, width=170 * mm, height=90 * mm))
     story.append(PageBreak())
 
     story.append(Paragraph("Detailed Defaulters", styles["Heading1"]))
@@ -279,13 +307,12 @@ st.title("🧘 Yoga Fee Compliance Dashboard")
 
 with st.sidebar:
     st.header("Upload Files")
-    fee_file = st.file_uploader("Fee Report (Excel)", type=["xlsx", "xls"])
+    fee_file = st.file_uploader("Fee Report (Excel/CSV)", type=["xlsx", "xls", "csv"])
     attendance_file = st.file_uploader("Attendance Report (Excel)", type=["xlsx", "xls"])
 
 if fee_file and attendance_file:
     try:
         with st.spinner("Processing files..."):
-            # .getvalue() passes raw bytes to cached functions, avoiding reruns on UI interaction
             paid_df = load_fee_data(fee_file.getvalue())
             attendance_df = load_attendance_data(attendance_file.getvalue())
             defaulters = generate_defaulters(attendance_df, paid_df)
@@ -352,7 +379,7 @@ if fee_file and attendance_file:
             )
             st.download_button("⬇ Download PDF", pdf, "Yoga_Fee_Report.pdf", "application/pdf")
         else:
-            st.info("No defaulters found matching the criteria.")
+            st.info("No defaulters found matching the criteria! All students have paid.")
             
     except Exception as e:
         st.error(f"An error occurred: {e}")

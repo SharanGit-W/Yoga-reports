@@ -4,18 +4,18 @@ import datetime
 import re
 from fpdf import FPDF
 
-# --- CONFIGURATION & SOP SETTINGS ---
+# --- SYSTEM CONFIGURATION ---
 st.set_page_config(page_title="Automated Fee & Attendance Reconciliation", layout="wide")
 
-st.title("Attendance vs. Fee Reconciliation Portal")
+st.title("Enterprise Attendance & Fee Reconciliation Portal")
 st.markdown("""
-This tool automates the cross-referencing of monthly attendance sheets against fee collection reports. 
-It establishes a strict data-matching procedure to identify users who have marked attendance but lack an active, overlapping fee payment.
+This production portal automates the cross-referencing of monthly attendance sheets against centralized fee collection reports. 
+It executes a strict data-matching routine to isolate records where attendance has been recorded without corresponding financial clearance.
 """)
 
-# --- HELPER FUNCTIONS ---
+# --- ROBUST UTILITY OPERATIONS ---
 def load_data(uploaded_file, skip_rows):
-    """Loads CSV or Excel data dynamically based on file extension."""
+    """Safely ingests CSV or Excel file formats based on file extension."""
     filename = uploaded_file.name.lower()
     if filename.endswith('.csv'):
         return pd.read_csv(uploaded_file, skiprows=skip_rows)
@@ -27,8 +27,8 @@ def load_data(uploaded_file, skip_rows):
 
 def extract_core_id(raw_id):
     """
-    Extracts the core numeric ID, ignoring center/batch prefixes and float conversions. 
-    Matches '7/KMP/MD/BR/47257', '8-NGB/PDC//TP10229', '47324', or '47324.0' -> returns string digits.
+    Extracts the core numeric user ID, stripping away center prefixes, batch codes, 
+    nested directory slashes, and floating point conversions.
     """
     if pd.isna(raw_id):
         return ""
@@ -37,7 +37,7 @@ def extract_core_id(raw_id):
     if raw_str.lower() == 'nan' or raw_str == '':
         return ""
         
-    # Handle pandas converting integer columns with empty rows to float64 (e.g., '41243.0')
+    # Rectify float truncation bug caused by trailing null rows in Excel sheets
     if re.search(r'\.0+$', raw_str):
         raw_str = re.sub(r'\.0+$', '', raw_str)
         
@@ -45,76 +45,96 @@ def extract_core_id(raw_id):
     return match.group(1) if match else raw_str
 
 def get_dynamic_column(df, keywords):
-    """Finds a column name dynamically based on a list of keywords."""
+    """Dynamically resolves column names to mitigate human error in naming schema across branches."""
     for col in df.columns:
         col_clean = re.sub(r'[^a-zA-Z]', '', str(col)).lower()
         if any(kw in col_clean for kw in keywords):
             return col
     return None
 
-def generate_pdf_report(df_unpaid):
-    """Generates a structured PDF document from the unpaid DataFrame."""
+def generate_pdf_report(df_unpaid, center_name):
+    """Compiles a professionally customized, branded PDF document for branch visibility."""
     pdf = FPDF()
     pdf.add_page()
     
-    # Header
+    # Clean up center name for display safety
+    display_center = str(center_name).encode('latin-1', 'replace').decode('latin-1')
+    
+    # Professional Header Banner
+    pdf.set_fill_color(31, 78, 121) # Corporate Navy
+    pdf.rect(0, 0, 210, 40, 'F')
+    
+    pdf.set_text_color(255, 255, 255)
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Unpaid Attendance Exception Report", ln=True, align='C')
-    pdf.set_font("Arial", 'I', 10)
-    pdf.cell(200, 10, txt=f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
-    pdf.ln(10)
+    pdf.cell(190, 15, txt="RASHTROTTHANA YOGIC SCIENCES & RESEARCH INSTITUTE", ln=True, align='L')
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(190, 5, txt=f"EXCEPTION REPORT: {display_center.upper()}", ln=True, align='L')
+    pdf.ln(15)
+    
+    # Reset text color for body
+    pdf.set_text_color(0, 0, 0)
+    
+    # Summary Dashboard Block
+    pdf.set_font("Arial", 'B', 11)
+    pdf.cell(190, 8, txt="Executive Summary", ln=True)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(2)
+    
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(95, 6, txt=f"Generated On: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=False)
+    pdf.cell(95, 6, txt=f"Total Policy Violations Detected: {len(df_unpaid)} accounts", ln=True)
+    pdf.cell(95, 6, txt=f"Total Unpaid Service Days: {df_unpaid['Unpaid Days Attended'].sum()} days", ln=True)
+    pdf.ln(8)
 
-    # Table Header setup
+    # Table Grid Layout Definition
     pdf.set_font("Arial", 'B', 10)
-    cols = ['Core ID', 'Name', 'Center', 'Months Unpaid', 'Days Attended']
-    col_widths = [20, 50, 45, 45, 30]
+    pdf.set_fill_color(240, 240, 240)
+    cols = ['Core ID', 'Name', 'Months Unpaid', 'Days Attended']
+    col_widths = [25, 65, 60, 40]
     
     for i, col in enumerate(cols):
-        pdf.cell(col_widths[i], 10, col, border=1, align='C')
+        pdf.cell(col_widths[i], 10, col, border=1, align='C', fill=True)
     pdf.ln()
 
-    # Table Body
+    # Data Row Populating with Latin-1 Encoding Sanitation
     pdf.set_font("Arial", '', 9)
     for _, row in df_unpaid.iterrows():
-        # Sanitize text to prevent FPDF unicode encoding errors
         stud_id = str(row['Core ID'])[:15].encode('latin-1', 'replace').decode('latin-1')
-        name = str(row['Name'])[:25].encode('latin-1', 'replace').decode('latin-1')
-        center = str(row['Center'])[:22].encode('latin-1', 'replace').decode('latin-1')
+        name = str(row['Name'])[:30].encode('latin-1', 'replace').decode('latin-1')
         months = str(row['Unpaid Months']).encode('latin-1', 'replace').decode('latin-1')
         days = str(row['Unpaid Days Attended'])
 
         pdf.cell(col_widths[0], 10, stud_id, border=1, align='C')
         pdf.cell(col_widths[1], 10, name, border=1)
-        pdf.cell(col_widths[2], 10, center, border=1)
-        pdf.cell(col_widths[3], 10, months, border=1)
-        pdf.cell(col_widths[4], 10, days, border=1, align='C')
+        pdf.cell(col_widths[2], 10, months, border=1)
+        pdf.cell(col_widths[3], 10, days, border=1, align='C')
         pdf.ln()
 
     return pdf.output(dest='S').encode('latin-1')
 
-# --- SIDEBAR PARAMETERS ---
+# --- USER CONTROL INTERFACE ---
 with st.sidebar:
-    st.header("Extraction Parameters")
-    skip_rows = st.number_input("Header Rows to Skip", min_value=0, max_value=10, value=3, 
-                                help="Number of title/blank rows before the actual column names start.")
-    active_status_only = st.checkbox("Filter Fee Report by 'Active' status only", value=True)
+    st.header("SOP Extraction Controls")
+    skip_rows = st.number_input("Metadata Header Rows to Skip", min_value=0, max_value=10, value=3, 
+                                help="Number of title/blank metadata rows above the main column headers.")
+    active_status_only = st.checkbox("Filter Fee Ledger by 'Active' status only", value=True)
 
-# --- MAIN UI ---
+# --- WORKFLOW FILES INGESTION ---
 col1, col2 = st.columns(2)
 with col1:
-    att_file = st.file_uploader("1. Upload Attendance Report", type=['csv', 'xlsx'])
+    att_file = st.file_uploader("1. Select Branch Attendance File", type=['csv', 'xlsx'])
 with col2:
-    fee_file = st.file_uploader("2. Upload Fee Report", type=['csv', 'xlsx'])
+    fee_file = st.file_uploader("2. Select Branch Fee Ledger File", type=['csv', 'xlsx'])
 
 if att_file and fee_file:
-    if st.button("Execute Reconciliation SOP", type="primary"):
+    if st.button("Run Reconciliation Engine", type="primary"):
         try:
-            with st.spinner("Processing datasets and cross-referencing records..."):
-                # 1. Ingest Data
+            with st.spinner("Executing cross-reconciliation mapping..."):
+                # 1. Load Datasets
                 df_att = load_data(att_file, skip_rows)
                 df_fee = load_data(fee_file, skip_rows)
                 
-                # 2. Dynamically locate key columns ONCE to optimize processing speed
+                # 2. Hoist Dynamic Target Columns to Optimize Loop Performance
                 att_id_col = get_dynamic_column(df_att, ['studentid', 'studid'])
                 fee_id_col = get_dynamic_column(df_fee, ['studentid', 'studid'])
                 part_col = get_dynamic_column(df_fee, ['particular']) or 'Particulars'
@@ -124,23 +144,23 @@ if att_file and fee_file:
                 att_center_col = get_dynamic_column(df_att, ['center']) or 'Center'
 
                 if not att_id_col or not fee_id_col:
-                    st.error("Critical Error: Could not locate Student ID columns in files. Check skipped rows.")
+                    st.error("Data Alignment Error: Failed to identify primary Student ID attributes. Please verify 'Rows to Skip' config.")
                     st.stop()
 
-                # 3. Standardize Primary Keys
+                # 3. Clean and Unify Joins Mapping
                 df_att['Core_ID'] = df_att[att_id_col].apply(extract_core_id)
                 df_fee['Core_ID'] = df_fee[fee_id_col].apply(extract_core_id)
 
-                # 4. Filter active payments
+                # 4. Enforce Financial System Filters
                 if active_status_only and fee_status_col in df_fee.columns:
                     df_fee = df_fee[df_fee[fee_status_col].astype(str).str.strip().str.lower() == 'active']
 
-                # Identify strictly date-formatted columns in attendance 
+                # Isolate target timeline arrays (YYYY-MM-DD columns)
                 date_cols = [col for col in df_att.columns if re.search(r'\d{4}-\d{2}-\d{2}', str(col))]
 
                 unpaid_records = []
 
-                # 5. Core matching logic
+                # 5. Core Matrix Matching Loop
                 for index, row in df_att.iterrows():
                     core_id = row['Core_ID']
                     raw_id = row[att_id_col]
@@ -148,30 +168,28 @@ if att_file and fee_file:
                     if not core_id: 
                         continue
 
-                    # Extract dates marked "Present" or "P"
+                    # Capture any variations of 'Present' marker notations
                     present_dates = [col for col in date_cols if str(row[col]).strip().lower() in ['present', 'p']]
                     
                     if not present_dates:
                         continue 
 
-                    # Map dates to specific month footprints
+                    # Build the student's actual attendance footprint
                     months_attended = {}
                     for d in present_dates:
                         date_str = re.search(r'\d{4}-\d{2}-\d{2}', str(d)).group(0)
                         dt = datetime.datetime.strptime(date_str, '%Y-%m-%d')
-                        month_str = dt.strftime('%b-%y').lower() # Yields 'may-26', 'jun-26'
+                        month_str = dt.strftime('%b-%y').lower()
                         months_attended[month_str] = months_attended.get(month_str, 0) + 1
 
-                    # Fetch user's active fee records
+                    # Query the active financial footprint for this student
                     user_fees = df_fee[df_fee['Core_ID'] == core_id]
-                    
-                    # Consolidate 'Particulars' string for this user and force lowercase
                     paid_particulars = " ".join(user_fees[part_col].fillna('').astype(str).tolist()).lower()
 
                     unpaid_days = 0
                     unpaid_months = []
 
-                    # Reconcile attendance footprint against payment footprint
+                    # Run cross-ledger validation checks
                     for month, days_present in months_attended.items():
                         if month not in paid_particulars:
                             unpaid_days += days_present
@@ -187,33 +205,45 @@ if att_file and fee_file:
                             'Unpaid Days Attended': unpaid_days
                         })
 
-                # 6. Output Generation
+                # Determine the specific center name dynamically from the dataset
+                detected_center = "Unknown_Center"
+                if att_center_col in df_att.columns and not df_att.empty:
+                    valid_centers = df_att[att_center_col].dropna()
+                    if not valid_centers.empty:
+                        detected_center = str(valid_centers.iloc[0]).strip()
+                
+                # Create a clean, stylized string for file naming (e.g., "RYSRI_RBI_Layout")
+                clean_center_filename = re.sub(r'[^a-zA-Z0-9]', '_', detected_center)
+                clean_center_filename = re.sub(r'_+', '_', clean_center_filename).strip('_')
+
+                # 6. User Interface Output Delivery
                 if not unpaid_records:
-                    st.success("Reconciliation Complete: All attending students have valid fee records.")
+                    st.success(f"Reconciliation Complete for {detected_center}: Zero exceptions found. All attending users possess active financial clearance.")
                 else:
                     df_unpaid = pd.DataFrame(unpaid_records)
-                    st.error(f"Reconciliation Complete: Found {len(df_unpaid)} student(s) attending without payment.")
+                    st.error(f"Reconciliation Complete: Isolated {len(df_unpaid)} accounts in {detected_center} violating policy.")
                     
                     st.dataframe(df_unpaid, use_container_width=True)
 
-                    pdf_bytes = generate_pdf_report(df_unpaid)
+                    # Prepare customized high-fidelity assets for distribution
+                    pdf_bytes = generate_pdf_report(df_unpaid, detected_center)
                     csv_bytes = df_unpaid.to_csv(index=False).encode('utf-8')
 
                     col_dl1, col_dl2 = st.columns(2)
                     with col_dl1:
                         st.download_button(
-                            label="📄 Download PDF Report",
+                            label=f"📄 Download {detected_center} PDF Report",
                             data=pdf_bytes,
-                            file_name=f"Unpaid_Attendance_Report_{datetime.date.today()}.pdf",
+                            file_name=f"Unpaid_Report_{clean_center_filename}_{datetime.date.today()}.pdf",
                             mime="application/pdf"
                         )
                     with col_dl2:
                         st.download_button(
-                            label="📊 Download Raw CSV (For Excel)",
+                            label="📊 Download Raw Exception Data (CSV)",
                             data=csv_bytes,
-                            file_name=f"Unpaid_Attendance_Data_{datetime.date.today()}.csv",
+                            file_name=f"Unpaid_Data_{clean_center_filename}_{datetime.date.today()}.csv",
                             mime="text/csv"
                         )
 
         except Exception as e:
-            st.error(f"Execution failed. Error trace: {e}")
+            st.error(f"System execution interdicted. Technical stack trace: {e}")

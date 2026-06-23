@@ -27,8 +27,8 @@ def load_data(uploaded_file, skip_rows):
 
 def extract_core_id(raw_id):
     """
-    Extracts the core numeric user ID, stripping away center prefixes, batch codes, 
-    nested directory slashes, and floating point conversions.
+    Extracts the core alphanumeric user ID, stripping away center directory slashes
+    while safely preserving special category modifiers (e.g., COUNC22736).
     """
     if pd.isna(raw_id):
         return ""
@@ -41,8 +41,9 @@ def extract_core_id(raw_id):
     if re.search(r'\.0+$', raw_str):
         raw_str = re.sub(r'\.0+$', '', raw_str)
         
-    match = re.search(r'(\d+)$', raw_str)
-    return match.group(1) if match else raw_str
+    # Split by slashes to get the actual unique suffix, preserving alphanumeric codes
+    parts = raw_str.replace('\\', '/').split('/')
+    return parts[-1].strip()
 
 def get_dynamic_column(df, keywords):
     """Dynamically resolves column names to mitigate human error in naming schema across branches."""
@@ -51,6 +52,27 @@ def get_dynamic_column(df, keywords):
         if any(kw in col_clean for kw in keywords):
             return col
     return None
+
+def extract_paid_months(text):
+    """
+    Robustly extracts all month/year combinations from messy free-text particulars.
+    Handles inputs like 'Ashtanga Yoga [Mar-26],[Apr-26]', 'May 2026', 'Jan - 26'.
+    Returns a standardized set of strings formatted as 'mon-yy' (e.g., 'mar-26').
+    """
+    if pd.isna(text): 
+        return set()
+    text = str(text)
+    
+    # Matches a 3+ letter month, optional spacing/hyphens, and a 2 or 4 digit year
+    matches = re.findall(r'([a-zA-Z]{3,})\s*[-/]?\s*(\d{2,4})', text)
+    paid_months = set()
+    
+    for m, y in matches:
+        month_str = m[:3].lower()  # Truncate to 3 letters (e.g., 'january' -> 'jan')
+        year_str = y[-2:]          # Truncate year to 2 digits (e.g., '2026' -> '26')
+        paid_months.add(f"{month_str}-{year_str}")
+        
+    return paid_months
 
 def generate_pdf_report(df_unpaid, center_name):
     """Compiles a professionally customized, branded PDF document for branch visibility."""
@@ -90,7 +112,7 @@ def generate_pdf_report(df_unpaid, center_name):
     pdf.set_font("Arial", 'B', 10)
     pdf.set_fill_color(240, 240, 240)
     cols = ['Core ID', 'Name', 'Months Unpaid', 'Days Attended']
-    col_widths = [25, 65, 60, 40]
+    col_widths = [35, 60, 55, 40]
     
     for i, col in enumerate(cols):
         pdf.cell(col_widths[i], 10, col, border=1, align='C', fill=True)
@@ -99,7 +121,7 @@ def generate_pdf_report(df_unpaid, center_name):
     # Data Row Populating with Latin-1 Encoding Sanitation
     pdf.set_font("Arial", '', 9)
     for _, row in df_unpaid.iterrows():
-        stud_id = str(row['Core ID'])[:15].encode('latin-1', 'replace').decode('latin-1')
+        stud_id = str(row['Core ID'])[:20].encode('latin-1', 'replace').decode('latin-1')
         name = str(row['Name'])[:30].encode('latin-1', 'replace').decode('latin-1')
         months = str(row['Unpaid Months']).encode('latin-1', 'replace').decode('latin-1')
         days = str(row['Unpaid Days Attended'])
@@ -117,7 +139,9 @@ with st.sidebar:
     st.header("SOP Extraction Controls")
     skip_rows = st.number_input("Metadata Header Rows to Skip", min_value=0, max_value=10, value=3, 
                                 help="Number of title/blank metadata rows above the main column headers.")
-    active_status_only = st.checkbox("Filter Fee Ledger by 'Active' status only", value=True)
+    
+    # Defaulted to False to avoid accidentally dropping historical ledger records
+    active_status_only = st.checkbox("Filter Fee Ledger by 'Active' status only", value=False)
 
 # --- WORKFLOW FILES INGESTION ---
 col1, col2 = st.columns(2)
@@ -157,6 +181,9 @@ if att_file and fee_file:
 
                 # Isolate target timeline arrays (YYYY-MM-DD columns)
                 date_cols = [col for col in df_att.columns if re.search(r'\d{4}-\d{2}-\d{2}', str(col))]
+                
+                # Expand robust attendance detection markers
+                valid_markers = {'present', 'p', 'pr', 'y', '1', 'yes', '✔', '✓'}
 
                 unpaid_records = []
 
@@ -168,8 +195,8 @@ if att_file and fee_file:
                     if not core_id: 
                         continue
 
-                    # Capture any variations of 'Present' marker notations
-                    present_dates = [col for col in date_cols if str(row[col]).strip().lower() in ['present', 'p']]
+                    # Capture any authorized variations of attendance marker notations
+                    present_dates = [col for col in date_cols if str(row[col]).strip().lower() in valid_markers]
                     
                     if not present_dates:
                         continue 
@@ -182,16 +209,19 @@ if att_file and fee_file:
                         month_str = dt.strftime('%b-%y').lower()
                         months_attended[month_str] = months_attended.get(month_str, 0) + 1
 
-                    # Query the active financial footprint for this student
+                    # Query the financial footprint for this student
                     user_fees = df_fee[df_fee['Core_ID'] == core_id]
-                    paid_particulars = " ".join(user_fees[part_col].fillna('').astype(str).tolist()).lower()
+                    paid_particulars = " ".join(user_fees[part_col].fillna('').astype(str).tolist())
+                    
+                    # Structurally extract the normalized set of months the user has paid for
+                    paid_months_set = extract_paid_months(paid_particulars)
 
                     unpaid_days = 0
                     unpaid_months = []
 
-                    # Run cross-ledger validation checks
+                    # Run structural cross-ledger validation
                     for month, days_present in months_attended.items():
-                        if month not in paid_particulars:
+                        if month not in paid_months_set:
                             unpaid_days += days_present
                             unpaid_months.append(month.capitalize())
 
@@ -212,7 +242,7 @@ if att_file and fee_file:
                     if not valid_centers.empty:
                         detected_center = str(valid_centers.iloc[0]).strip()
                 
-                # Create a clean, stylized string for file naming (e.g., "RYSRI_RBI_Layout")
+                # Create a clean, stylized string for file naming
                 clean_center_filename = re.sub(r'[^a-zA-Z0-9]', '_', detected_center)
                 clean_center_filename = re.sub(r'_+', '_', clean_center_filename).strip('_')
 

@@ -5,10 +5,10 @@ import tempfile
 from fpdf import FPDF
 
 # --- App Configuration ---
-st.set_page_config(page_title="Unpaid Fee Tracker - Enterprise Edition", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Fee Compliance Tracker", page_icon="🛡️", layout="wide")
 
-st.title("🛡️ Unpaid Fee Tracker")
-st.markdown("Upload the Attendance and Fee reports to instantly generate a comprehensive PDF of unpaid students (Yoga Batches Only, 3+ Days Attended).")
+st.title("🛡️ Unpaid Fee Tracker - Yoga Division")
+st.markdown("Upload the **Attendance** and **Fee Reports** to generate a professional PDF of actionable unpaid students (3+ Days Attended).")
 
 # --- UI: Month and Year Selectors ---
 col1, col2 = st.columns(2)
@@ -22,16 +22,15 @@ with col2:
 
 # --- Reference Maps ---
 month_map = {
-    "January": ("01", "Jan"), "February": ("02", "Feb"), "March": ("03", "Mar"),
-    "April": ("04", "Apr"), "May": ("05", "May"), "June": ("06", "Jun"),
-    "July": ("07", "Jul"), "August": ("08", "Aug"), "September": ("09", "Sep"),
-    "October": ("10", "Oct"), "November": ("11", "Nov"), "December": ("12", "Dec")
+    "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr", 
+    "May": "May", "June": "Jun", "July": "Jul", "August": "Aug", 
+    "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
 }
 
-# Allowed Yoga Batches (Strict Filter)
-ALLOWED_YOGA_BATCHES = [
+# Strict Yoga Keyword Filter 
+ALLOWED_YOGA_KEYWORDS = [
     "general",
-    "weekend yoga adults",
+    "weekend yoga",
     "children yoga"
 ]
 
@@ -39,6 +38,7 @@ ALLOWED_YOGA_BATCHES = [
 def safe_str(val, max_len=None):
     if pd.isna(val): return ""
     s = str(val).encode('latin-1', 'replace').decode('latin-1').strip()
+    # Clean up decimal places for integers
     if s.endswith('.0'): s = s[:-2] 
     if max_len and len(s) > max_len:
         return s[:max_len-2] + ".."
@@ -55,7 +55,8 @@ def extract_numeric_id(val):
 def find_header_row(df, keywords):
     for idx, row in df.iterrows():
         row_str = "".join(str(val).lower().replace(" ", "") for val in row.dropna())
-        if any(kw in row_str for kw in keywords):
+        # Uses 'all' to be absolutely sure it's the right row
+        if all(kw in row_str for kw in keywords):
             return idx
     return -1
 
@@ -70,7 +71,7 @@ def get_col(df, possible_names):
 def is_allowed_yoga_batch(batch_val):
     if pd.isna(batch_val): return False
     b_clean = re.sub(r'\s+', ' ', str(batch_val).strip().lower())
-    return any(kw in b_clean for kw in ALLOWED_YOGA_BATCHES)
+    return any(kw in b_clean for kw in ALLOWED_YOGA_KEYWORDS)
 
 # --- BEAUTIFIED PDF GENERATION ---
 def create_pdf(dataframe, month, year, org_name, center_name):
@@ -79,11 +80,11 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     
     # Theme Colors
     primary_color = (41, 128, 185) # Professional Blue
-    text_color = (50, 50, 50)      # Soft Black
+    text_color = (40, 40, 40)      # Soft Black
     line_color = (200, 200, 200)   # Light Gray
     
-    # 1. Organization Name (Brand Color)
-    pdf.set_font("Arial", 'B', 16)
+    # 1. Organization Name 
+    pdf.set_font("Arial", 'B', 15)
     pdf.set_text_color(*primary_color)
     pdf.cell(0, 10, safe_str(org_name), ln=True, align='C')
     
@@ -91,35 +92,35 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.set_font("Arial", 'B', 12)
     pdf.set_text_color(*text_color)
     pdf.cell(0, 6, safe_str(center_name), ln=True, align='C')
-    pdf.ln(4)
+    pdf.ln(3)
     
     # Decorative Divider Line
     pdf.set_draw_color(*primary_color)
-    pdf.set_line_width(0.5)
+    pdf.set_line_width(0.6)
     pdf.line(15, pdf.get_y(), 195, pdf.get_y())
-    pdf.ln(6)
+    pdf.ln(5)
     
     # 3. Report Title
     pdf.set_font("Arial", 'B', 13)
     pdf.set_text_color(*text_color)
-    pdf.cell(0, 8, f"Actionable Unpaid Students Report (Yoga Batches) - {month} {year}", ln=True, align='C')
+    pdf.cell(0, 8, f"Fee Compliance Action Report - {month} {year}", ln=True, align='C')
     
     # 4. Summary & Criteria
     pdf.set_font("Arial", 'I', 10)
-    pdf.cell(0, 6, "Criteria: Attended 3 or more classes without fee payment.", ln=True, align='C')
+    pdf.cell(0, 6, "Criteria: Target Yoga Batches | Attended 3+ Days | Payment Not Found", ln=True, align='C')
     
     pdf.set_font("Arial", 'B', 11)
     pdf.cell(0, 8, f"Total Actionable Students: {len(dataframe)}", ln=True, align='C')
     pdf.ln(6)
     
-    # 5. Table Layout Setup
+    # 5. Table Layout Setup (Total 190mm fits A4 perfectly)
     w_id = 30
     w_name = 50
     w_batch = 40
     w_time = 50
     w_days = 20
     
-    # Table Header (Solid Blue Background, White Text)
+    # Table Header (Solid Color Background)
     pdf.set_fill_color(*primary_color)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Arial", 'B', 9)
@@ -132,13 +133,13 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.cell(w_time, 10, "Timing", border=1, align='C', fill=True)
     pdf.cell(w_days, 10, "Days Att.", border=1, ln=True, align='C', fill=True)
     
-    # 6. Table Data (Zebra Striping for readability)
+    # 6. Table Data (Zebra Striping)
     pdf.set_font("Arial", '', 9)
     pdf.set_text_color(*text_color)
     
-    fill = False # Toggle for alternating row colors
+    fill = False # Toggle
     for _, row in dataframe.iterrows():
-        # Set zebra stripe color (light gray vs white)
+        # Alternate between light gray and white
         if fill:
             pdf.set_fill_color(245, 245, 245)
         else:
@@ -150,14 +151,14 @@ def create_pdf(dataframe, month, year, org_name, center_name):
         pdf.cell(w_time, 8, safe_str(row.get('Timing', ''), 30), border=1, align='C', fill=True)
         pdf.cell(w_days, 8, safe_str(row.get('Days_Attended', '')), border=1, ln=True, align='C', fill=True)
         
-        fill = not fill # Switch color for next row
+        fill = not fill 
         
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf.output(tmp.name)
         return tmp.name
 
 # --- UI: File Uploaders ---
-st.info("💡 You can upload either `.xlsx` or `.csv` files.")
+st.info("💡 Upload `.xlsx` or `.csv` files. The system will automatically adapt to the format.")
 attendance_file = st.file_uploader("1. Upload Attendance Report", type=["xlsx", "xls", "csv"])
 fee_file = st.file_uploader("2. Upload Fee Report", type=["xlsx", "xls", "csv"])
 
@@ -165,8 +166,8 @@ fee_file = st.file_uploader("2. Upload Fee Report", type=["xlsx", "xls", "csv"])
 if st.button("Generate Professional Report"):
     if attendance_file and fee_file:
         try:
-            with st.spinner("Executing strict data cross-referencing to ensure 100% accuracy..."):
-                target_month_num, target_month_short = month_map[selected_month]
+            with st.spinner("Executing compliance cross-check..."):
+                target_month_short = month_map[selected_month]
                 fee_target = f"{target_month_short}-{str(selected_year)[-2:]}"
 
                 # ==========================================
@@ -183,8 +184,11 @@ if st.button("Generate Professional Report"):
                     st.stop()
                 
                 fee_df = fee_raw.copy()
-                fee_df.columns = fee_df.iloc[fee_header_idx]
+                fee_df.columns = fee_df.iloc[fee_header_idx].astype(str).str.strip()
                 fee_df = fee_df.iloc[fee_header_idx+1:].reset_index(drop=True)
+                
+                # Drop duplicate columns safely to prevent crashes
+                fee_df = fee_df.loc[:, ~fee_df.columns.duplicated(keep='first')]
                 
                 fee_id_col = get_col(fee_df, ["studid", "studentid"])
                 fee_part_col = get_col(fee_df, ["particulars", "particular"])
@@ -216,8 +220,8 @@ if st.button("Generate Professional Report"):
                 
                 raw_org = att_raw.iloc[0, 0] if len(att_raw) > 0 else None
                 raw_center = att_raw.iloc[1, 0] if len(att_raw) > 1 else None
-                org_name_val = str(raw_org).strip() if pd.notna(raw_org) else "Organization Name Not Found"
-                center_name_val = str(raw_center).strip() if pd.notna(raw_center) else "Center Name Not Found"
+                org_name_val = str(raw_org).strip() if pd.notna(raw_org) else "Organization Not Found"
+                center_name_val = str(raw_center).strip() if pd.notna(raw_center) else "Center Not Found"
                 
                 att_header_idx = find_header_row(att_raw, ["studentid", "studentname"])
                 if att_header_idx == -1:
@@ -225,8 +229,11 @@ if st.button("Generate Professional Report"):
                     st.stop()
                 
                 att_df = att_raw.copy()
-                att_df.columns = att_df.iloc[att_header_idx]
+                att_df.columns = att_df.iloc[att_header_idx].astype(str).str.strip()
                 att_df = att_df.iloc[att_header_idx+1:].reset_index(drop=True)
+                
+                # Drop duplicate columns (Crucial bug fix for Excel exports)
+                att_df = att_df.loc[:, ~att_df.columns.duplicated(keep='first')]
                 
                 att_id_col = get_col(att_df, ["studentid", "studid"])
                 att_name_col = get_col(att_df, ["studentname", "name"])
@@ -237,13 +244,13 @@ if st.button("Generate Professional Report"):
                     st.error("🚨 Error: Missing required columns in the Attendance Report. Ensure the 'Present' column exists.")
                     st.stop()
                 
-                # Filter for only the allowed Yoga Batches
+                # Filter strictly for allowed Yoga Batches
                 att_df = att_df[att_df[att_batch_col].apply(is_allowed_yoga_batch)].copy()
                 
-                # Extract days strictly from the Present column
+                # Extract days strictly from the 'Present' column explicitly
                 att_df['Days_Attended'] = pd.to_numeric(att_df[att_present_col], errors='coerce').fillna(0)
                 
-                # STRICT FILTER: Only keep students with 3 or more days attended
+                # STRICT FILTER: Only keep students with 3 or more days
                 attended_df = att_df[att_df['Days_Attended'] >= 3].copy()
                 
                 attended_df['Clean_ID'] = attended_df[att_id_col].apply(extract_numeric_id)
@@ -266,9 +273,9 @@ if st.button("Generate Professional Report"):
                 st.write(f"**Center:** {center_name_val}")
                 
                 if unpaid_df.empty:
-                    st.success(f"🎉 100% Match! All Yoga students (3+ days) in {selected_month} {selected_year} have paid.")
+                    st.success(f"🎉 100% Compliance! No actionable Yoga students (3+ days) found in {selected_month} {selected_year}.")
                 else:
-                    st.warning(f"Found {len(unpaid_df)} actionable Yoga students who have attended 3+ days without paying.")
+                    st.warning(f"Found {len(unpaid_df)} actionable Yoga students who attended 3+ days without payment.")
                     st.dataframe(unpaid_df, use_container_width=True)
                     
                     pdf_path = create_pdf(unpaid_df, selected_month, selected_year, org_name_val, center_name_val)
@@ -279,11 +286,11 @@ if st.button("Generate Professional Report"):
                     st.download_button(
                         label="📥 Download Certified PDF Report",
                         data=pdf_bytes,
-                        file_name=f"Yoga_Unpaid_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
+                        file_name=f"Compliance_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
                         mime="application/pdf",
                         type="primary"
                     )
         except Exception as e:
-            st.error(f"🚨 A system error occurred while processing: {e}. Please check the files and try again.")
+            st.error(f"🚨 A system error occurred while processing: {e}. Please verify your Excel files are not corrupted.")
     else:
         st.info("⚠️ Please upload both the Attendance and Fee reports to begin.")

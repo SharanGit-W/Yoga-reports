@@ -8,7 +8,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Unpaid Fee Tracker - Enterprise Edition", page_icon="🛡️", layout="wide")
 
 st.title("🛡️ Unpaid Fee Tracker")
-st.markdown("Upload the Attendance and Fee reports to instantly generate a comprehensive PDF of unpaid students.")
+st.markdown("Upload the Attendance and Fee reports to instantly generate a comprehensive PDF of unpaid students (Yoga Batches Only).")
 
 # --- UI: Month and Year Selectors ---
 col1, col2 = st.columns(2)
@@ -28,10 +28,19 @@ month_map = {
     "October": ("10", "Oct"), "November": ("11", "Nov"), "December": ("12", "Dec")
 }
 
+# Allowed Yoga Batches (Strict Filter)
+ALLOWED_YOGA_BATCHES = [
+    "general",
+    "weekend yoga adults",
+    "children yoga"
+]
+
 # --- Resilient Helper Functions ---
 def safe_str(val, max_len=None):
     if pd.isna(val): return ""
     s = str(val).encode('latin-1', 'replace').decode('latin-1').strip()
+    # Remove decimal .0 for neatness if it's a number acting as a string
+    if s.endswith('.0'): s = s[:-2] 
     if max_len and len(s) > max_len:
         return s[:max_len-2] + ".."
     return s
@@ -45,7 +54,6 @@ def extract_numeric_id(val):
     return float(match.group(1)) if match else None
 
 def find_header_row(df, keywords):
-    # Dynamically scans rows to find where the actual data headers begin
     for idx, row in df.iterrows():
         row_str = "".join(str(val).lower().replace(" ", "") for val in row.dropna())
         if any(kw in row_str for kw in keywords):
@@ -53,7 +61,6 @@ def find_header_row(df, keywords):
     return -1
 
 def get_col(df, possible_names):
-    # Fuzzy matcher to prevent crashes if column names are slightly misspelled (e.g., "Stud ID" vs "StudentId")
     clean_possible = [str(p).strip().lower().replace(" ", "").replace("_", "") for p in possible_names]
     for col in df.columns:
         col_clean = str(col).strip().lower().replace(" ", "").replace("_", "")
@@ -61,27 +68,10 @@ def get_col(df, possible_names):
             return col
     return None
 
-def is_target_month(col_name, target_month_num, target_month_short, target_year):
-    # Protects against Excel changing date formats unexpectedly
-    if pd.isna(col_name): return False
-    col_str = str(col_name).strip().lower()
-    
-    # 1. Check strict ISO (e.g. 2026-06)
-    if f"{target_year}-{target_month_num}" in col_str: return True
-    # 2. Check Text format (e.g. jun-26, jun-2026, jun 26)
-    short_year = str(target_year)[-2:]
-    target_short = target_month_short.lower()
-    if f"{target_short}-{short_year}" in col_str or f"{target_short}-{target_year}" in col_str: return True
-    if f"{target_short} {short_year}" in col_str or f"{target_short} {target_year}" in col_str: return True
-    
-    # 3. Check DateTime object parsing
-    try:
-        dt = pd.to_datetime(col_name, errors='coerce')
-        if pd.notna(dt) and dt.month == int(target_month_num) and dt.year == int(target_year):
-            return True
-    except:
-        pass
-    return False
+def is_allowed_yoga_batch(batch_val):
+    if pd.isna(batch_val): return False
+    b_clean = re.sub(r'\s+', ' ', str(batch_val).strip().lower())
+    return any(kw in b_clean for kw in ALLOWED_YOGA_BATCHES)
 
 # --- PDF Generation Function ---
 def create_pdf(dataframe, month, year, org_name, center_name):
@@ -95,7 +85,7 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.ln(4)
     
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 8, f"Actionable Unpaid Students Report - {month} {year}", ln=True, align='C')
+    pdf.cell(0, 8, f"Unpaid Students Report (Yoga Batches) - {month} {year}", ln=True, align='C')
     pdf.set_font("Arial", '', 10)
     pdf.cell(0, 8, f"Total Students Attending but Unpaid: {len(dataframe)}", ln=True, align='C')
     pdf.ln(6)
@@ -122,7 +112,7 @@ def create_pdf(dataframe, month, year, org_name, center_name):
         return tmp.name
 
 # --- UI: File Uploaders ---
-st.info("💡 You can upload either `.xlsx` or `.csv` files. The system will automatically adapt to the data format.")
+st.info("💡 You can upload either `.xlsx` or `.csv` files.")
 attendance_file = st.file_uploader("1. Upload Attendance Report", type=["xlsx", "xls", "csv"])
 fee_file = st.file_uploader("2. Upload Fee Report", type=["xlsx", "xls", "csv"])
 
@@ -151,7 +141,6 @@ if st.button("Generate Professional Report"):
                 fee_df.columns = fee_df.iloc[fee_header_idx]
                 fee_df = fee_df.iloc[fee_header_idx+1:].reset_index(drop=True)
                 
-                # Fetch columns via fuzzy matcher
                 fee_id_col = get_col(fee_df, ["studid", "studentid"])
                 fee_part_col = get_col(fee_df, ["particulars", "particular"])
                 fee_timing_col = get_col(fee_df, ["timing", "timings"])
@@ -162,7 +151,7 @@ if st.button("Generate Professional Report"):
                 
                 fee_df = fee_df.dropna(subset=[fee_part_col, fee_id_col])
                 
-                # Build Timings Library mapping (gracefully handles missing timings)
+                # Build Timings Library mapping
                 timing_map = {}
                 if fee_timing_col:
                     valid_timings = fee_df.dropna(subset=[fee_id_col, fee_timing_col]).copy()
@@ -182,7 +171,6 @@ if st.button("Generate Professional Report"):
                 else:
                     att_raw = pd.read_excel(attendance_file, header=None)
                 
-                # Safe Extraction of Organization and Center Names
                 raw_org = att_raw.iloc[0, 0] if len(att_raw) > 0 else None
                 raw_center = att_raw.iloc[1, 0] if len(att_raw) > 1 else None
                 org_name_val = str(raw_org).strip() if pd.notna(raw_org) else "Organization Name Not Found"
@@ -200,23 +188,20 @@ if st.button("Generate Professional Report"):
                 att_id_col = get_col(att_df, ["studentid", "studid"])
                 att_name_col = get_col(att_df, ["studentname", "name"])
                 att_batch_col = get_col(att_df, ["batch", "batches"])
+                att_present_col = get_col(att_df, ["present", "totalpresent", "dayspresent"])
                 
-                if not att_id_col or not att_name_col:
-                    st.error("🚨 Error: Missing required columns in the Attendance Report.")
+                if not att_id_col or not att_name_col or not att_present_col:
+                    st.error("🚨 Error: Missing required columns in the Attendance Report. Ensure the 'Present' column exists.")
                     st.stop()
                 
-                # Safely find the dates dynamically
-                month_cols = [col for col in att_df.columns if is_target_month(col, target_month_num, target_month_short, selected_year)]
+                # Filter for only the allowed Yoga Batches
+                att_df = att_df[att_df[att_batch_col].apply(is_allowed_yoga_batch)].copy()
                 
-                if not month_cols:
-                    st.error(f"🚨 Data Missing: Could not find any attendance columns matching {selected_month} {selected_year}.")
-                    st.stop()
+                # Fetch Days Attended strictly from the 'Present' column
+                # Use pd.to_numeric with errors='coerce' to turn text into NaN, then fill with 0
+                att_df['Days_Attended'] = pd.to_numeric(att_df[att_present_col], errors='coerce').fillna(0)
                 
-                # Strict parsing of "Present" regardless of extra spaces or capitalization
-                def strict_count_present(row):
-                    return sum(1 for val in row if pd.notna(val) and str(val).strip().lower() == 'present')
-                
-                att_df['Days_Attended'] = att_df[month_cols].apply(strict_count_present, axis=1)
+                # Filter out students who haven't attended at all
                 attended_df = att_df[att_df['Days_Attended'] > 0].copy()
                 
                 attended_df['Clean_ID'] = attended_df[att_id_col].apply(extract_numeric_id)
@@ -225,10 +210,8 @@ if st.button("Generate Professional Report"):
                 # ==========================================
                 # 3. CROSS-REFERENCE & OUTPUT
                 # ==========================================
-                # Isolate students who attended but their clean numeric ID is NOT in the paid list
                 unpaid_df = attended_df[~attended_df['Clean_ID'].isin(paid_ids)].copy()
                 
-                # Standardize column naming for output
                 unpaid_df['StudentId'] = unpaid_df[att_id_col]
                 unpaid_df['StudentName'] = unpaid_df[att_name_col]
                 unpaid_df['Batch'] = unpaid_df[att_batch_col] if att_batch_col else "N/A"
@@ -241,9 +224,9 @@ if st.button("Generate Professional Report"):
                 st.write(f"**Center:** {center_name_val}")
                 
                 if unpaid_df.empty:
-                    st.success(f"🎉 100% Match! All students attending in {selected_month} {selected_year} have paid.")
+                    st.success(f"🎉 100% Match! All Yoga students attending in {selected_month} {selected_year} have paid.")
                 else:
-                    st.warning(f"Found {len(unpaid_df)} students who have attended classes without paying.")
+                    st.warning(f"Found {len(unpaid_df)} Yoga students who have attended classes without paying.")
                     st.dataframe(unpaid_df, use_container_width=True)
                     
                     pdf_path = create_pdf(unpaid_df, selected_month, selected_year, org_name_val, center_name_val)
@@ -254,7 +237,7 @@ if st.button("Generate Professional Report"):
                     st.download_button(
                         label="📥 Download Certified PDF Report",
                         data=pdf_bytes,
-                        file_name=f"Action_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
+                        file_name=f"Yoga_Unpaid_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
                         mime="application/pdf",
                         type="primary"
                     )

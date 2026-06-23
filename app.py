@@ -5,194 +5,268 @@ from datetime import datetime
 import io
 from fpdf import FPDF
 
-# --- STREAMLIT PAGE CONFIG ---
-st.set_page_config(page_title="Yoga Fee Defaulters Report", page_icon="🧘‍♂️", layout="wide")
+# ==========================================
+# PAGE CONFIG & CUSTOM CSS (From your version)
+# ==========================================
+st.set_page_config(page_title="Yoga Kendra Fee Defaulter Tracker", layout="wide", page_icon="🧘‍♂️")
 
-# Customizing Streamlit UI a bit to make it look modern
 st.markdown("""
-    <style>
-    .main {background-color: #f8f9fa;}
-    .stButton>button {background-color: #004d40; color: white; border-radius: 5px; width: 100%;}
-    h1, h2, h3 {color: #004d40;}
-    .report-card {background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}
-    </style>
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #2C3E50;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #7F8C8D;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #FFFFFF;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        text-align: center;
+        border-left: 5px solid #3498DB;
+    }
+    .stButton>button {
+        background-color: #2C3E50;
+        color: white;
+        border-radius: 8px;
+        padding: 10px 24px;
+        font-weight: 600;
+        border: none;
+    }
+    .stButton>button:hover {
+        background-color: #34495E;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-# --- PDF GENERATOR CLASS ---
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 class PDFReport(FPDF):
-    def __init__(self, org_name, kendra_name, report_month):
+    def __init__(self, org_name, center_name, report_month):
         super().__init__()
         self.org_name = org_name
-        self.kendra_name = kendra_name
+        self.center_name = center_name
         self.report_month = report_month
 
     def header(self):
+        self.set_font('Helvetica', 'B', 16)
+        self.cell(0, 10, str(self.org_name), 0, 1, 'C')
         self.set_font('Helvetica', 'B', 14)
-        self.cell(0, 8, str(self.org_name), border=0, align='C', new_x="LMARGIN", new_y="NEXT")
-        self.set_font('Helvetica', 'B', 12)
-        self.cell(0, 8, str(self.kendra_name), border=0, align='C', new_x="LMARGIN", new_y="NEXT")
-        self.set_font('Helvetica', 'I', 11)
-        self.cell(0, 8, f'Defaulters Report - {self.report_month}', border=0, align='C', new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 10, str(self.center_name), 0, 1, 'C')
+        self.set_font('Helvetica', '', 12)
+        self.cell(0, 10, f'Fee Defaulters Report ({self.report_month})', 0, 1, 'C')
         self.ln(5)
 
     def footer(self):
         self.set_y(-15)
         self.set_font('Helvetica', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', border=0, align='C')
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-# --- HELPER FUNCTIONS ---
 def load_data(file):
-    """Loads CSV or Excel safely, skipping 3 header rows for tabular data"""
+    """Loads CSV or Excel safely, skipping 3 header rows"""
     if file.name.endswith('.csv'):
         df = pd.read_csv(file, skiprows=3)
-        # Read the top two lines for metadata
         df_meta = pd.read_csv(file, nrows=2, header=None)
     else:
         df = pd.read_excel(file, skiprows=3)
         df_meta = pd.read_excel(file, nrows=2, header=None)
     
-    org_name = str(df_meta.iloc[0, 0]).strip()
-    kendra_name = str(df_meta.iloc[1, 0]).strip()
+    org_name = str(df_meta.iloc[0, 0]).strip() if not df_meta.empty else "Organization Name Not Found"
+    kendra_name = str(df_meta.iloc[1, 0]).strip() if not df_meta.empty else "Kendra Name Not Found"
     return df, org_name, kendra_name
 
 def extract_months(part_string):
     """Extracts strings like [Jan-26], [Feb-26] into a list"""
-    return re.findall(r'\[(.*?)\]', str(part_string))
+    return set(re.findall(r'\[(.*?)\]', str(part_string)))
 
-def process_defaulters(fee_file, att_file):
-    # 1. Load Data
-    df_fee, org_name, kendra_name = load_data(fee_file)
-    df_att, _, _ = load_data(att_file)
-
-    # 2. Process Fee Data
-    # Filter only Active and Ashtanga Yoga records
-    df_fee = df_fee[df_fee['Status'].astype(str).str.strip().str.lower() == 'active']
-    df_fee = df_fee[df_fee['Particulars'].astype(str).str.contains('Ashtanga Yoga', case=False, na=False)]
-    
-    # Extract numerical Stud ID robustly
-    df_fee['Clean_ID'] = df_fee['Stud ID'].astype(str).str.extract(r'(\d+)$')
-    
-    # Aggregate paid months for duplicates/monthly payers
-    df_fee['Paid_Months'] = df_fee['Particulars'].apply(extract_months)
-    fee_agg = df_fee.groupby('Clean_ID').agg({
-        'Paid_Months': lambda x: set([item for sublist in x for item in sublist]),
-        'Timing': 'first' # Take the timing they are registered for
-    }).reset_index()
-
-    # 3. Process Attendance Data
-    # Filter Active students
-    df_att = df_att[df_att['Status'].astype(str).str.strip().str.lower() == 'active']
-    
-    # Extract numerical ID from composite strings like 7/KMP/Y/1182
-    df_att['Clean_ID'] = df_att['StudentId'].astype(str).str.extract(r'(\d+)$')
-    
-    # Identify the date columns and determine the report month (e.g., "May-26")
-    date_cols = [col for col in df_att.columns if re.match(r'\d{4}-\d{2}-\d{2}', str(col))]
-    if not date_cols:
-        st.error("Could not find standard date columns in the attendance file.")
-        return None, None, None, None
-        
-    first_date = datetime.strptime(date_cols[0], "%Y-%m-%d")
-    report_month_str = first_date.strftime("%b-%y") # Maps 2026-05-01 -> "May-26"
-    
-    # Calculate Total Present Days
-    df_att['Days_Attended'] = df_att[date_cols].apply(
-        lambda row: row.astype(str).str.contains('Present', case=False, na=False).sum(), axis=1
-    )
-    
-    # Filter for > 2 classes
-    df_att = df_att[df_att['Days_Attended'] > 2]
-
-    # 4. Merge Data and Find Defaulters
-    merged = pd.merge(df_att, fee_agg, on='Clean_ID', how='left')
-    
-    def check_defaulter(row):
-        paid_set = row['Paid_Months']
-        if isinstance(paid_set, set):
-            return report_month_str not in paid_set
-        return True # If NaN (never paid anything for Ashtanga), they are a defaulter
-
-    merged['Is_Defaulter'] = merged.apply(check_defaulter, axis=1)
-    defaulters = merged[merged['Is_Defaulter'] == True]
-    
-    # Format the final output table
-    final_cols = ['Clean_ID', 'StudentName', 'Batch', 'Timing', 'Days_Attended']
-    defaulters_display = defaulters[final_cols].copy()
-    defaulters_display.columns = ['Student ID', 'Student Name', 'Batch', 'Timing', 'Days Attended (Unpaid)']
-    defaulters_display['Timing'] = defaulters_display['Timing'].fillna('Not mapped in Fee Report')
-    
-    return defaulters_display, org_name, kendra_name, report_month_str
-
-def generate_pdf(df, org_name, kendra_name, report_month_str):
-    pdf = PDFReport(org_name, kendra_name, report_month_str)
+def generate_pdf(df_def, org, center, report_month):
+    pdf = PDFReport(org, center, report_month)
     pdf.add_page()
     
-    # Table Header
-    pdf.set_font("Helvetica", "B", 10)
-    col_widths = [25, 55, 45, 40, 25]
-    headers = ["Stud ID", "Name", "Batch", "Timing", "Days Unpaid"]
+    # Summary Section
+    pdf.set_font('Helvetica', '', 10)
+    total_defaulters = len(df_def)
+    total_unpaid_days = df_def['Unpaid Attended Days'].sum()
+    pdf.cell(0, 8, f'Total Defaulters: {total_defaulters}   |   Total Unpaid Attended Days: {total_unpaid_days}', 0, 1, 'L')
+    pdf.ln(5)
     
-    for i, header in enumerate(headers):
-        pdf.cell(col_widths[i], 10, header, border=1, align='C')
+    # Table Headers
+    pdf.set_font('Helvetica', 'B', 9)
+    headers = ['Student ID', 'Name', 'Batch', 'Timing', 'Days Unpaid']
+    col_widths = [25, 60, 45, 40, 20]
+    
+    pdf.set_fill_color(44, 62, 80)
+    pdf.set_text_color(255, 255, 255)
+    for i, h in enumerate(headers):
+        pdf.cell(col_widths[i], 8, h, 1, 0, 'C', True)
     pdf.ln()
-
-    # Table Body
-    pdf.set_font("Helvetica", "", 9)
-    for _, row in df.iterrows():
-        # Truncate strings to prevent PDF wrapping overflow
-        s_id = str(row['Student ID'])
-        s_name = str(row['Student Name'])[:25] 
-        s_batch = str(row['Batch'])[:22]
-        s_timing = str(row['Timing'])[:18]
-        s_days = str(row['Days Attended (Unpaid)'])
+    
+    # Table Data (Your awesome Zebra-striping design)
+    pdf.set_font('Helvetica', '', 8)
+    pdf.set_text_color(0, 0, 0)
+    
+    for idx, row in enumerate(df_def.itertuples()):
+        if idx % 2 == 0:
+            pdf.set_fill_color(245, 245, 245)
+        else:
+            pdf.set_fill_color(255, 255, 255)
+            
+        name = str(row.Name)[:30]
+        batch = str(row.Batch)[:25]
+        timing = str(row.Timing)[:20]
         
-        pdf.cell(col_widths[0], 10, s_id, border=1, align='C')
-        pdf.cell(col_widths[1], 10, s_name, border=1, align='L')
-        pdf.cell(col_widths[2], 10, s_batch, border=1, align='C')
-        pdf.cell(col_widths[3], 10, s_timing, border=1, align='C')
-        pdf.cell(col_widths[4], 10, s_days, border=1, align='C')
-        pdf.ln()
+        pdf.cell(col_widths[0], 7, str(row.Student_ID), 1, 0, 'C', True)
+        pdf.cell(col_widths[1], 7, name, 1, 0, 'L', True)
+        pdf.cell(col_widths[2], 7, batch, 1, 0, 'C', True)
+        pdf.cell(col_widths[3], 7, timing, 1, 0, 'C', True)
+        pdf.cell(col_widths[4], 7, str(row.Unpaid_Attended_Days), 1, 1, 'C', True)
         
     return pdf.output()
 
-# --- MAIN APP UI ---
-st.title("🧘‍♂️ RYSRI Fee Defaulters Tracker")
-st.markdown("Upload the Fee Report and Attendance Report to cross-reference Ashtanga Yoga students who have attended **more than 2 classes** without paying for the current month.")
+# ==========================================
+# STREAMLIT UI
+# ==========================================
+st.markdown('<p class="main-header">Yoga Kendra Fee Defaulter Tracker</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Upload your Attendance and Fee reports to identify Ashtanga Yoga students attending without payment.</p>', unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 with col1:
-    fee_upload = st.file_uploader("Upload Fee Report (.csv / .xlsx)", type=['csv', 'xlsx'])
+    att_file = st.file_uploader("Upload Attendance Report (.csv / .xlsx)", type=['csv', 'xlsx'])
 with col2:
-    att_upload = st.file_uploader("Upload Attendance Report (.csv / .xlsx)", type=['csv', 'xlsx'])
+    fee_file = st.file_uploader("Upload Fee Report (.csv / .xlsx)", type=['csv', 'xlsx'])
 
-if st.button("Generate Defaulters Report", type="primary"):
-    if fee_upload and att_upload:
-        with st.spinner("Processing Data and Cross-referencing IDs..."):
+if st.button("Generate Defaulter Report", use_container_width=True):
+    if att_file and fee_file:
+        with st.spinner("Processing data and calculating discrepancies..."):
             try:
-                result_df, org_name, kendra_name, report_month = process_defaulters(fee_upload, att_upload)
+                # 1. Load Data
+                df_fee, org_name, center_name = load_data(fee_file)
+                df_att, _, _ = load_data(att_file)
+
+                # 2. Process Fee Report
+                df_fee = df_fee[df_fee['Status'].astype(str).str.strip().str.lower() == 'active']
+                df_fee = df_fee[df_fee['Particulars'].astype(str).str.contains('Ashtanga Yoga', case=False, na=False)]
                 
-                if result_df is not None:
-                    st.success(f"Report Generated Successfully for {kendra_name} ({report_month})!")
+                df_fee['Clean_ID'] = df_fee['Stud ID'].astype(str).str.extract(r'(\d+)$')
+                df_fee = df_fee.dropna(subset=['Clean_ID'])
+                
+                df_fee['Paid_Months'] = df_fee['Particulars'].apply(extract_months)
+                fee_agg = df_fee.groupby('Clean_ID').agg({
+                    'Paid_Months': lambda x: set().union(*x),
+                    'Timing': 'first'
+                }).reset_index()
+
+                # 3. Process Attendance Report
+                df_att = df_att[df_att['Status'].astype(str).str.strip().str.lower() == 'active']
+                
+                # Filter out Bharatanatyam and other non-yoga batches
+                yoga_mask = df_att['Batch'].astype(str).str.contains(r'General|Yoga|Junior|Y G', case=False, na=False) | \
+                            df_att['StudentId'].astype(str).str.contains(r'/Y/', na=False)
+                df_att = df_att[yoga_mask]
+                
+                df_att['Clean_ID'] = df_att['StudentId'].astype(str).str.extract(r'(\d+)$')
+                df_att = df_att.dropna(subset=['Clean_ID'])
+                
+                # Robust date column detection (Handles 2026-05-01 formatting safely)
+                date_cols = [col for col in df_att.columns if re.match(r'\d{4}-\d{2}-\d{2}', str(col)) or re.match(r'\d{1,2}/\d{1,2}/\d{2,4}', str(col))]
+                
+                if not date_cols:
+                    st.error("Could not detect date columns. Ensure the file contains dates like YYYY-MM-DD or MM/DD/YY.")
+                    st.stop()
+                
+                # Get the report month dynamically
+                first_col_str = str(date_cols[0]).split(' ')[0]
+                try:
+                    first_date = pd.to_datetime(first_col_str)
+                    report_month_str = first_date.strftime("%b-%y")
+                except:
+                    report_month_str = "Current Month"
+
+                # Calculate attended days (Column-wise safely)
+                present_mask = df_att[date_cols].apply(lambda col: col.astype(str).str.contains('Present', case=False, na=False))
+                df_att['Unpaid Attended Days'] = present_mask.sum(axis=1)
+                
+                # Apply the rule: More than 2 classes
+                df_att = df_att[df_att['Unpaid Attended Days'] > 2]
+
+                # 4. Merge and Find Defaulters
+                merged = pd.merge(df_att, fee_agg, on='Clean_ID', how='left')
+                
+                def check_defaulter(row):
+                    paid_set = row['Paid_Months']
+                    if isinstance(paid_set, set):
+                        return report_month_str not in paid_set
+                    return True # True if no payment record at all
+
+                merged['Is_Defaulter'] = merged.apply(check_defaulter, axis=1)
+                df_defaulters = merged[merged['Is_Defaulter'] == True]
+                
+                # Format final dataframe
+                if not df_defaulters.empty:
+                    df_defaulters = df_defaulters[['Clean_ID', 'StudentName', 'Batch', 'Timing', 'Unpaid Attended Days']].copy()
+                    df_defaulters.columns = ['Student_ID', 'Name', 'Batch', 'Timing', 'Unpaid_Attended_Days']
+                    df_defaulters['Timing'] = df_defaulters['Timing'].fillna('Not mapped in Fee Report')
+                    df_defaulters = df_defaulters.sort_values(by='Unpaid_Attended_Days', ascending=False)
+                else:
+                    df_defaulters = pd.DataFrame(columns=['Student_ID', 'Name', 'Batch', 'Timing', 'Unpaid_Attended_Days'])
+
+                # 5. Display Results (Using your styled UI)
+                st.markdown("---")
+                
+                if not df_defaulters.empty:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Total Defaulters", len(df_defaulters))
+                    m2.metric("Total Unpaid Days", df_defaulters['Unpaid_Attended_Days'].sum())
+                    m3.metric("Center", center_name)
                     
-                    st.markdown("<div class='report-card'>", unsafe_allow_html=True)
-                    st.subheader(f"📊 Defaulters Found: {len(result_df)}")
-                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        df_defaulters, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "Student_ID": st.column_config.TextColumn("Student ID", width="small"),
+                            "Name": st.column_config.TextColumn("Name", width="medium"),
+                            "Batch": st.column_config.TextColumn("Batch", width="small"),
+                            "Timing": st.column_config.TextColumn("Timing", width="medium"),
+                            "Unpaid_Attended_Days": st.column_config.NumberColumn("Unpaid Days", width="small")
+                        }
+                    )
                     
-                    # Generate and allow PDF download
-                    pdf_bytes = generate_pdf(result_df, org_name, kendra_name, report_month)
+                    # 6. Output Buttons (CSV + PDF)
+                    pdf_bytes = generate_pdf(df_defaulters, org_name, center_name, report_month_str)
+                    csv_bytes = df_defaulters.to_csv(index=False).encode('utf-8')
                     
-                    colA, colB, colC = st.columns([1, 2, 1])
-                    with colB:
+                    colA, colB = st.columns(2)
+                    with colA:
                         st.download_button(
-                            label="📄 Download Professional PDF Report",
+                            label="📄 Download Professional PDF",
                             data=pdf_bytes,
-                            file_name=f"Defaulters_Report_{kendra_name.replace(' ', '_')}_{report_month}.pdf",
+                            file_name=f"Defaulter_Report_{center_name.replace(' ', '_')}_{report_month_str}.pdf",
                             mime="application/pdf",
                             use_container_width=True
                         )
-                    st.markdown("</div>", unsafe_allow_html=True)
-
+                    with colB:
+                        st.download_button(
+                            label="📊 Download CSV Data",
+                            data=csv_bytes,
+                            file_name=f"Defaulter_Report_{center_name.replace(' ', '_')}_{report_month_str}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                else:
+                    st.success("✅ No defaulters found! All attending students (>2 classes) have paid their fees.")
+                    
             except Exception as e:
-                st.error(f"An error occurred while processing the files. Ensure the file formats match the expected layout. Error Details: {e}")
+                st.error(f"An error occurred during processing: {str(e)}")
+                st.info("Please ensure the files are in the correct format.")
     else:
-        st.warning("⚠️ Please upload both the Fee Report and the Attendance Report before processing.")
+        st.warning("Please upload both the Attendance and Fee report files to proceed.")

@@ -5,9 +5,9 @@ import tempfile
 from fpdf import FPDF
 
 # --- App Configuration ---
-st.set_page_config(page_title="Fee Compliance Tracker v2.0", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Fee Compliance Tracker", page_icon="🛡️", layout="centered")
 
-st.title("🛡️ Unpaid Fee Tracker - Yoga Division (v2.0 Strict Filter)")
+st.title("🛡️ Unpaid Fee Tracker - Yoga Division")
 st.markdown("Upload the **Attendance** and **Fee Reports** to generate a professional PDF of actionable unpaid students. *(Only students with 3+ days will be shown).*")
 
 # --- UI: Month and Year Selectors ---

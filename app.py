@@ -158,6 +158,12 @@ if att_file and fee_file:
                 df_att = load_data(att_file, skip_rows)
                 df_fee = load_data(fee_file, skip_rows)
                 
+                # BUGFIX: Force Dataframe headers to Strings.
+                # Prevents Pandas from parsing Excel date headers as datetime.datetime objects, 
+                # which causes the engine to crash when performing string validation logic.
+                df_att.columns = df_att.columns.astype(str)
+                df_fee.columns = df_fee.columns.astype(str)
+                
                 # 2. Hoist Dynamic Target Columns to Optimize Loop Performance
                 att_id_col = get_dynamic_column(df_att, ['studentid', 'studid'])
                 fee_id_col = get_dynamic_column(df_fee, ['studentid', 'studid'])
@@ -175,9 +181,9 @@ if att_file and fee_file:
                 df_att['Core_ID'] = df_att[att_id_col].apply(extract_core_id)
                 df_fee['Core_ID'] = df_fee[fee_id_col].apply(extract_core_id)
 
-                # 4. Enforce Financial System Filters
+                # 4. Enforce Financial System Filters safely via Lambda to avoid internal .str casting errors
                 if active_status_only and fee_status_col in df_fee.columns:
-                    df_fee = df_fee[df_fee[fee_status_col].astype(str).str.strip().str.lower() == 'active']
+                    df_fee = df_fee[df_fee[fee_status_col].apply(lambda x: str(x).strip().lower() == 'active')]
 
                 # Isolate target timeline arrays (YYYY-MM-DD columns)
                 date_cols = [col for col in df_att.columns if re.search(r'\d{4}-\d{2}-\d{2}', str(col))]
@@ -226,13 +232,14 @@ if att_file and fee_file:
                             unpaid_months.append(month.capitalize())
 
                     if unpaid_days > 0:
+                        # BUGFIX: Strictly cast dictionary values to prevent Streamlit UI from receiving un-serializable datetime objects
                         unpaid_records.append({
-                            'Core ID': core_id,
-                            'Original ID': raw_id,
-                            'Name': row.get(att_name_col, 'Unknown'),
-                            'Center': row.get(att_center_col, 'Unknown'),
+                            'Core ID': str(core_id),
+                            'Original ID': str(raw_id),
+                            'Name': str(row.get(att_name_col, 'Unknown')),
+                            'Center': str(row.get(att_center_col, 'Unknown')),
                             'Unpaid Months': ", ".join(unpaid_months),
-                            'Unpaid Days Attended': unpaid_days
+                            'Unpaid Days Attended': int(unpaid_days)
                         })
 
                 # Determine the specific center name dynamically from the dataset

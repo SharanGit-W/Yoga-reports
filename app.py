@@ -5,10 +5,10 @@ import tempfile
 from fpdf import FPDF
 
 # --- App Configuration ---
-st.set_page_config(page_title="Unpaid Fee Tracker", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Unpaid Fee Tracker - Enterprise Edition", page_icon="🛡️", layout="wide")
 
-st.title("📊 Unpaid Fee Tracker")
-st.markdown("Upload the Attendance and Fee reports to instantly generate a PDF of unpaid students.")
+st.title("🛡️ Unpaid Fee Tracker")
+st.markdown("Upload the Attendance and Fee reports to instantly generate a comprehensive PDF of unpaid students.")
 
 # --- UI: Month and Year Selectors ---
 col1, col2 = st.columns(2)
@@ -18,10 +18,9 @@ with col1:
         ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
     )
 with col2:
-    # Defaults to 2026 (index 2 of the list)
     selected_year = st.selectbox("Select Year", list(range(2024, 2031)), index=2) 
 
-# --- Logic: Format Dates for Searching ---
+# --- Reference Maps ---
 month_map = {
     "January": ("01", "Jan"), "February": ("02", "Feb"), "March": ("03", "Mar"),
     "April": ("04", "Apr"), "May": ("05", "May"), "June": ("06", "Jun"),
@@ -29,146 +28,237 @@ month_map = {
     "October": ("10", "Oct"), "November": ("11", "Nov"), "December": ("12", "Dec")
 }
 
-# e.g., '2026-06' and 'Jun-26'
-attendance_target = f"{selected_year}-{month_map[selected_month][0]}"
-fee_target = f"{month_map[selected_month][1]}-{str(selected_year)[-2:]}"
+# --- Resilient Helper Functions ---
+def safe_str(val, max_len=None):
+    if pd.isna(val): return ""
+    s = str(val).encode('latin-1', 'replace').decode('latin-1').strip()
+    if max_len and len(s) > max_len:
+        return s[:max_len-2] + ".."
+    return s
 
-# --- UI: File Uploaders ---
-st.info("💡 You can upload either `.xlsx` or `.csv` files.")
-attendance_file = st.file_uploader("1. Upload Attendance Report", type=["xlsx", "xls", "csv"])
-fee_file = st.file_uploader("2. Upload Fee Report", type=["xlsx", "xls", "csv"])
+def extract_numeric_id(val):
+    if pd.isna(val): return None
+    val_str = str(val).strip()
+    if '/' in val_str:
+        val_str = val_str.split('/')[-1]
+    match = re.search(r'(\d+)', val_str)
+    return float(match.group(1)) if match else None
+
+def find_header_row(df, keywords):
+    # Dynamically scans rows to find where the actual data headers begin
+    for idx, row in df.iterrows():
+        row_str = "".join(str(val).lower().replace(" ", "") for val in row.dropna())
+        if any(kw in row_str for kw in keywords):
+            return idx
+    return -1
+
+def get_col(df, possible_names):
+    # Fuzzy matcher to prevent crashes if column names are slightly misspelled (e.g., "Stud ID" vs "StudentId")
+    clean_possible = [str(p).strip().lower().replace(" ", "").replace("_", "") for p in possible_names]
+    for col in df.columns:
+        col_clean = str(col).strip().lower().replace(" ", "").replace("_", "")
+        if col_clean in clean_possible:
+            return col
+    return None
+
+def is_target_month(col_name, target_month_num, target_month_short, target_year):
+    # Protects against Excel changing date formats unexpectedly
+    if pd.isna(col_name): return False
+    col_str = str(col_name).strip().lower()
+    
+    # 1. Check strict ISO (e.g. 2026-06)
+    if f"{target_year}-{target_month_num}" in col_str: return True
+    # 2. Check Text format (e.g. jun-26, jun-2026, jun 26)
+    short_year = str(target_year)[-2:]
+    target_short = target_month_short.lower()
+    if f"{target_short}-{short_year}" in col_str or f"{target_short}-{target_year}" in col_str: return True
+    if f"{target_short} {short_year}" in col_str or f"{target_short} {target_year}" in col_str: return True
+    
+    # 3. Check DateTime object parsing
+    try:
+        dt = pd.to_datetime(col_name, errors='coerce')
+        if pd.notna(dt) and dt.month == int(target_month_num) and dt.year == int(target_year):
+            return True
+    except:
+        pass
+    return False
 
 # --- PDF Generation Function ---
 def create_pdf(dataframe, month, year, org_name, center_name):
-    pdf = FPDF()
+    pdf = FPDF(orientation='P', unit='mm', format='A4')
     pdf.add_page()
     
-    # 1. Organization Name
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 8, org_name, ln=True, align='C')
-    
-    # 2. Center Name
+    pdf.cell(0, 8, safe_str(org_name), ln=True, align='C')
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 8, center_name, ln=True, align='C')
+    pdf.cell(0, 8, safe_str(center_name), ln=True, align='C')
     pdf.ln(4)
     
-    # 3. Report Title
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 8, f"Unpaid Students Report - {month} {year}", ln=True, align='C')
-    
-    # 4. Summary
+    pdf.cell(0, 8, f"Actionable Unpaid Students Report - {month} {year}", ln=True, align='C')
     pdf.set_font("Arial", '', 10)
     pdf.cell(0, 8, f"Total Students Attending but Unpaid: {len(dataframe)}", ln=True, align='C')
     pdf.ln(6)
     
-    # 5. Table Header
-    pdf.set_font("Arial", 'B', 11)
-    pdf.cell(20) # Left margin
-    pdf.cell(50, 10, "Student ID", border=1, align='C')
-    pdf.cell(100, 10, "Student Name", border=1, ln=True, align='C')
+    # Table Header
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(30, 10, "Student ID", border=1, align='C')
+    pdf.cell(50, 10, "Student Name", border=1, align='C')
+    pdf.cell(35, 10, "Batch", border=1, align='C')
+    pdf.cell(55, 10, "Timing", border=1, align='C')
+    pdf.cell(20, 10, "Days Att.", border=1, ln=True, align='C')
     
-    # 6. Table Data
-    pdf.set_font("Arial", '', 11)
+    # Table Data
+    pdf.set_font("Arial", '', 9)
     for _, row in dataframe.iterrows():
-        # Encode strings to prevent FPDF from crashing on special characters
-        safe_name = str(row['StudentName']).encode('latin-1', 'replace').decode('latin-1')
-        safe_id = str(row['StudentId']).encode('latin-1', 'replace').decode('latin-1')
+        pdf.cell(30, 8, safe_str(row.get('StudentId', ''), 15), border=1, align='C')
+        pdf.cell(50, 8, safe_str(row.get('StudentName', ''), 25), border=1, align='L')
+        pdf.cell(35, 8, safe_str(row.get('Batch', ''), 18), border=1, align='C')
+        pdf.cell(55, 8, safe_str(row.get('Timing', ''), 30), border=1, align='C')
+        pdf.cell(20, 8, safe_str(row.get('Days_Attended', '')), border=1, ln=True, align='C')
         
-        pdf.cell(20) 
-        pdf.cell(50, 10, safe_id, border=1, align='C')
-        pdf.cell(100, 10, safe_name, border=1, ln=True, align='L')
-        
-    # Save to a temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf.output(tmp.name)
         return tmp.name
 
-# --- Execution Logic ---
-if st.button("Generate Report"):
+# --- UI: File Uploaders ---
+st.info("💡 You can upload either `.xlsx` or `.csv` files. The system will automatically adapt to the data format.")
+attendance_file = st.file_uploader("1. Upload Attendance Report", type=["xlsx", "xls", "csv"])
+fee_file = st.file_uploader("2. Upload Fee Report", type=["xlsx", "xls", "csv"])
+
+# --- Core Logic Execution ---
+if st.button("Generate Professional Report"):
     if attendance_file and fee_file:
         try:
-            with st.spinner("Analyzing records..."):
+            with st.spinner("Executing strict data cross-referencing to ensure 100% accuracy..."):
+                target_month_num, target_month_short = month_map[selected_month]
+                fee_target = f"{target_month_short}-{str(selected_year)[-2:]}"
+
+                # ==========================================
+                # 1. PROCESS FEE REPORT
+                # ==========================================
+                if fee_file.name.endswith('.csv'):
+                    fee_raw = pd.read_csv(fee_file, header=None)
+                else:
+                    fee_raw = pd.read_excel(fee_file, header=None)
                 
-                # --- 1. Process Attendance ---
+                fee_header_idx = find_header_row(fee_raw, ["studid", "particulars"])
+                if fee_header_idx == -1:
+                    st.error("🚨 Error: Could not locate 'Stud ID' or 'Particulars' in the Fee Report.")
+                    st.stop()
+                
+                fee_df = fee_raw.copy()
+                fee_df.columns = fee_df.iloc[fee_header_idx]
+                fee_df = fee_df.iloc[fee_header_idx+1:].reset_index(drop=True)
+                
+                # Fetch columns via fuzzy matcher
+                fee_id_col = get_col(fee_df, ["studid", "studentid"])
+                fee_part_col = get_col(fee_df, ["particulars", "particular"])
+                fee_timing_col = get_col(fee_df, ["timing", "timings"])
+                
+                if not fee_id_col or not fee_part_col:
+                    st.error("🚨 Error: Missing required columns in the Fee Report.")
+                    st.stop()
+                
+                fee_df = fee_df.dropna(subset=[fee_part_col, fee_id_col])
+                
+                # Build Timings Library mapping (gracefully handles missing timings)
+                timing_map = {}
+                if fee_timing_col:
+                    valid_timings = fee_df.dropna(subset=[fee_id_col, fee_timing_col]).copy()
+                    valid_timings['Clean_ID'] = valid_timings[fee_id_col].apply(extract_numeric_id)
+                    valid_timings = valid_timings.dropna(subset=['Clean_ID']).drop_duplicates(subset=['Clean_ID'], keep='last')
+                    timing_map = valid_timings.set_index('Clean_ID')[fee_timing_col].to_dict()
+
+                # Find Exact Paid Students
+                paid_df = fee_df[fee_df[fee_part_col].astype(str).str.contains(fee_target, case=False, na=False)]
+                paid_ids = set(paid_df[fee_id_col].apply(extract_numeric_id).dropna().unique())
+
+                # ==========================================
+                # 2. PROCESS ATTENDANCE
+                # ==========================================
                 if attendance_file.name.endswith('.csv'):
                     att_raw = pd.read_csv(attendance_file, header=None)
                 else:
                     att_raw = pd.read_excel(attendance_file, header=None)
                 
-                # Extract Top Info
-                org_name_val = str(att_raw.iloc[0, 0]).strip()
-                center_name_val = str(att_raw.iloc[1, 0]).strip()
+                # Safe Extraction of Organization and Center Names
+                raw_org = att_raw.iloc[0, 0] if len(att_raw) > 0 else None
+                raw_center = att_raw.iloc[1, 0] if len(att_raw) > 1 else None
+                org_name_val = str(raw_org).strip() if pd.notna(raw_org) else "Organization Name Not Found"
+                center_name_val = str(raw_center).strip() if pd.notna(raw_center) else "Center Name Not Found"
                 
-                # Reformat the dataframe to use Row 3 as columns
-                att_df = att_raw.copy()
-                att_df.columns = att_df.iloc[3]
-                att_df = att_df.iloc[4:].reset_index(drop=True)
-                
-                # Validation check
-                if 'StudentId' not in att_df.columns or 'StudentName' not in att_df.columns:
-                    st.error("Invalid Attendance file. Could not find 'StudentId' or 'StudentName' columns. Did you accidentally upload the Fee Report here?")
+                att_header_idx = find_header_row(att_raw, ["studentid", "studentname"])
+                if att_header_idx == -1:
+                    st.error("🚨 Error: Could not locate 'StudentId' or 'StudentName' in the Attendance Report.")
                     st.stop()
                 
-                # Find current month columns
-                month_cols = [col for col in att_df.columns if pd.notnull(col) and attendance_target in str(col)]
+                att_df = att_raw.copy()
+                att_df.columns = att_df.iloc[att_header_idx]
+                att_df = att_df.iloc[att_header_idx+1:].reset_index(drop=True)
+                
+                att_id_col = get_col(att_df, ["studentid", "studid"])
+                att_name_col = get_col(att_df, ["studentname", "name"])
+                att_batch_col = get_col(att_df, ["batch", "batches"])
+                
+                if not att_id_col or not att_name_col:
+                    st.error("🚨 Error: Missing required columns in the Attendance Report.")
+                    st.stop()
+                
+                # Safely find the dates dynamically
+                month_cols = [col for col in att_df.columns if is_target_month(col, target_month_num, target_month_short, selected_year)]
                 
                 if not month_cols:
-                    st.error(f"Could not find any attendance data for {selected_month} {selected_year}. Please ensure you selected the correct month/year matching the file.")
+                    st.error(f"🚨 Data Missing: Could not find any attendance columns matching {selected_month} {selected_year}.")
                     st.stop()
                 
-                # Identify attendees
-                att_df['Attended'] = att_df[month_cols].apply(lambda row: 'Present' in row.values, axis=1)
-                attended_df = att_df[att_df['Attended'] == True].copy()
+                # Strict parsing of "Present" regardless of extra spaces or capitalization
+                def strict_count_present(row):
+                    return sum(1 for val in row if pd.notna(val) and str(val).strip().lower() == 'present')
                 
-                # Ensure the extraction works even if some IDs are null/empty
-                attended_df['Numeric_ID'] = attended_df['StudentId'].astype(str).str.extract(r'(\d+)$').astype(float)
+                att_df['Days_Attended'] = att_df[month_cols].apply(strict_count_present, axis=1)
+                attended_df = att_df[att_df['Days_Attended'] > 0].copy()
                 
-                # --- 2. Process Fee Report ---
-                if fee_file.name.endswith('.csv'):
-                    fee_df = pd.read_csv(fee_file, skiprows=3)
-                else:
-                    fee_df = pd.read_excel(fee_file, skiprows=3)
+                attended_df['Clean_ID'] = attended_df[att_id_col].apply(extract_numeric_id)
+                attended_df = attended_df.dropna(subset=['Clean_ID'])
                 
-                # Validation check
-                if 'Particulars' not in fee_df.columns or 'Stud ID' not in fee_df.columns:
-                    st.error("Invalid Fee file. Could not find 'Particulars' or 'Stud ID' columns. Did you accidentally upload the Attendance Report here?")
-                    st.stop()
-                    
-                fee_df = fee_df.dropna(subset=['Particulars', 'Stud ID'])
+                # ==========================================
+                # 3. CROSS-REFERENCE & OUTPUT
+                # ==========================================
+                # Isolate students who attended but their clean numeric ID is NOT in the paid list
+                unpaid_df = attended_df[~attended_df['Clean_ID'].isin(paid_ids)].copy()
                 
-                # Find paid students
-                paid_df = fee_df[fee_df['Particulars'].str.contains(fee_target, case=False, na=False)]
-                paid_ids = paid_df['Stud ID'].unique() 
+                # Standardize column naming for output
+                unpaid_df['StudentId'] = unpaid_df[att_id_col]
+                unpaid_df['StudentName'] = unpaid_df[att_name_col]
+                unpaid_df['Batch'] = unpaid_df[att_batch_col] if att_batch_col else "N/A"
+                unpaid_df['Timing'] = unpaid_df['Clean_ID'].map(timing_map).fillna("Timing Not Found")
                 
-                # --- 3. Find Unpaid ---
-                unpaid_df = attended_df[~attended_df['Numeric_ID'].isin(paid_ids)][['StudentId', 'StudentName']].dropna()
-                unpaid_df = unpaid_df.reset_index(drop=True)
+                unpaid_df = unpaid_df[['StudentId', 'StudentName', 'Batch', 'Timing', 'Days_Attended']].reset_index(drop=True)
                 
-                # --- 4. Render Output ---
                 st.subheader("Report Output")
                 st.write(f"**Organization:** {org_name_val}")
                 st.write(f"**Center:** {center_name_val}")
                 
                 if unpaid_df.empty:
-                    st.success(f"🎉 Great news! All students attending in {selected_month} {selected_year} have paid!")
+                    st.success(f"🎉 100% Match! All students attending in {selected_month} {selected_year} have paid.")
                 else:
-                    st.warning(f"Found {len(unpaid_df)} students who attended without paying.")
+                    st.warning(f"Found {len(unpaid_df)} students who have attended classes without paying.")
                     st.dataframe(unpaid_df, use_container_width=True)
                     
-                    # Generate PDF
                     pdf_path = create_pdf(unpaid_df, selected_month, selected_year, org_name_val, center_name_val)
-                    
                     with open(pdf_path, "rb") as pdf_file:
                         pdf_bytes = pdf_file.read()
                     
+                    safe_filename_center = re.sub(r'[^A-Za-z0-9_-]', '_', center_name_val)
                     st.download_button(
-                        label="📥 Download Professional PDF Report",
+                        label="📥 Download Certified PDF Report",
                         data=pdf_bytes,
-                        file_name=f"Unpaid_Report_{center_name_val.replace(' ', '_')}_{selected_month}_{selected_year}.pdf",
+                        file_name=f"Action_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
                         mime="application/pdf",
                         type="primary"
                     )
         except Exception as e:
-            st.error(f"An error occurred while processing the files: {e}")
+            st.error(f"🚨 A system error occurred while processing: {e}. Please check the files and try again.")
     else:
-        st.info("⚠️ Please upload both the Attendance and Fee reports to continue.")
+        st.info("⚠️ Please upload both the Attendance and Fee reports to begin.")

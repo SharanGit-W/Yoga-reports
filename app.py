@@ -5,10 +5,10 @@ import tempfile
 from fpdf import FPDF
 
 # --- App Configuration ---
-st.set_page_config(page_title="Fee Compliance Tracker", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Fee Compliance Tracker v2.0", page_icon="🛡️", layout="wide")
 
-st.title("🛡️ Unpaid Fee Tracker - Yoga Division")
-st.markdown("Upload the **Attendance** and **Fee Reports** to generate a professional PDF of actionable unpaid students (3+ Days Attended).")
+st.title("🛡️ Unpaid Fee Tracker - Yoga Division (v2.0 Strict Filter)")
+st.markdown("Upload the **Attendance** and **Fee Reports** to generate a professional PDF of actionable unpaid students. *(Only students with 3+ days will be shown).*")
 
 # --- UI: Month and Year Selectors ---
 col1, col2 = st.columns(2)
@@ -38,7 +38,6 @@ ALLOWED_YOGA_KEYWORDS = [
 def safe_str(val, max_len=None):
     if pd.isna(val): return ""
     s = str(val).encode('latin-1', 'replace').decode('latin-1').strip()
-    # Clean up decimal places for integers
     if s.endswith('.0'): s = s[:-2] 
     if max_len and len(s) > max_len:
         return s[:max_len-2] + ".."
@@ -55,7 +54,6 @@ def extract_numeric_id(val):
 def find_header_row(df, keywords):
     for idx, row in df.iterrows():
         row_str = "".join(str(val).lower().replace(" ", "") for val in row.dropna())
-        # Uses 'all' to be absolutely sure it's the right row
         if all(kw in row_str for kw in keywords):
             return idx
     return -1
@@ -79,33 +77,28 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.add_page()
     
     # Theme Colors
-    primary_color = (41, 128, 185) # Professional Blue
-    text_color = (40, 40, 40)      # Soft Black
-    line_color = (200, 200, 200)   # Light Gray
+    primary_color = (41, 128, 185) 
+    text_color = (40, 40, 40)      
+    line_color = (200, 200, 200)   
     
-    # 1. Organization Name 
     pdf.set_font("Arial", 'B', 15)
     pdf.set_text_color(*primary_color)
     pdf.cell(0, 10, safe_str(org_name), ln=True, align='C')
     
-    # 2. Center Name
     pdf.set_font("Arial", 'B', 12)
     pdf.set_text_color(*text_color)
     pdf.cell(0, 6, safe_str(center_name), ln=True, align='C')
     pdf.ln(3)
     
-    # Decorative Divider Line
     pdf.set_draw_color(*primary_color)
     pdf.set_line_width(0.6)
     pdf.line(15, pdf.get_y(), 195, pdf.get_y())
     pdf.ln(5)
     
-    # 3. Report Title
     pdf.set_font("Arial", 'B', 13)
     pdf.set_text_color(*text_color)
-    pdf.cell(0, 8, f"Fee Compliance Action Report - {month} {year}", ln=True, align='C')
+    pdf.cell(0, 8, f"Fee Compliance Action Report (v2) - {month} {year}", ln=True, align='C')
     
-    # 4. Summary & Criteria
     pdf.set_font("Arial", 'I', 10)
     pdf.cell(0, 6, "Criteria: Target Yoga Batches | Attended 3+ Days | Payment Not Found", ln=True, align='C')
     
@@ -113,14 +106,12 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.cell(0, 8, f"Total Actionable Students: {len(dataframe)}", ln=True, align='C')
     pdf.ln(6)
     
-    # 5. Table Layout Setup (Total 190mm fits A4 perfectly)
     w_id = 30
     w_name = 50
     w_batch = 40
     w_time = 50
     w_days = 20
     
-    # Table Header (Solid Color Background)
     pdf.set_fill_color(*primary_color)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Arial", 'B', 9)
@@ -133,13 +124,11 @@ def create_pdf(dataframe, month, year, org_name, center_name):
     pdf.cell(w_time, 10, "Timing", border=1, align='C', fill=True)
     pdf.cell(w_days, 10, "Days Att.", border=1, ln=True, align='C', fill=True)
     
-    # 6. Table Data (Zebra Striping)
     pdf.set_font("Arial", '', 9)
     pdf.set_text_color(*text_color)
     
-    fill = False # Toggle
+    fill = False 
     for _, row in dataframe.iterrows():
-        # Alternate between light gray and white
         if fill:
             pdf.set_fill_color(245, 245, 245)
         else:
@@ -186,8 +175,6 @@ if st.button("Generate Professional Report"):
                 fee_df = fee_raw.copy()
                 fee_df.columns = fee_df.iloc[fee_header_idx].astype(str).str.strip()
                 fee_df = fee_df.iloc[fee_header_idx+1:].reset_index(drop=True)
-                
-                # Drop duplicate columns safely to prevent crashes
                 fee_df = fee_df.loc[:, ~fee_df.columns.duplicated(keep='first')]
                 
                 fee_id_col = get_col(fee_df, ["studid", "studentid"])
@@ -231,8 +218,6 @@ if st.button("Generate Professional Report"):
                 att_df = att_raw.copy()
                 att_df.columns = att_df.iloc[att_header_idx].astype(str).str.strip()
                 att_df = att_df.iloc[att_header_idx+1:].reset_index(drop=True)
-                
-                # Drop duplicate columns (Crucial bug fix for Excel exports)
                 att_df = att_df.loc[:, ~att_df.columns.duplicated(keep='first')]
                 
                 att_id_col = get_col(att_df, ["studentid", "studid"])
@@ -247,10 +232,10 @@ if st.button("Generate Professional Report"):
                 # Filter strictly for allowed Yoga Batches
                 att_df = att_df[att_df[att_batch_col].apply(is_allowed_yoga_batch)].copy()
                 
-                # Extract days strictly from the 'Present' column explicitly
-                att_df['Days_Attended'] = pd.to_numeric(att_df[att_present_col], errors='coerce').fillna(0)
+                # STRICT MATH CONVERSION: Force data into clean integers
+                att_df['Days_Attended'] = pd.to_numeric(att_df[att_present_col], errors='coerce').fillna(0).astype(int)
                 
-                # STRICT FILTER: Only keep students with 3 or more days
+                # ABSOLUTE FILTER: Mathematically impossible for 1 or 2 to pass this line
                 attended_df = att_df[att_df['Days_Attended'] >= 3].copy()
                 
                 attended_df['Clean_ID'] = attended_df[att_id_col].apply(extract_numeric_id)
@@ -284,9 +269,9 @@ if st.button("Generate Professional Report"):
                     
                     safe_filename_center = re.sub(r'[^A-Za-z0-9_-]', '_', center_name_val)
                     st.download_button(
-                        label="📥 Download Certified PDF Report",
+                        label="📥 Download Certified PDF Report (v2)",
                         data=pdf_bytes,
-                        file_name=f"Compliance_Report_{safe_filename_center}_{selected_month}_{selected_year}.pdf",
+                        file_name=f"Compliance_Report_{safe_filename_center}_{selected_month}_{selected_year}_v2.pdf",
                         mime="application/pdf",
                         type="primary"
                     )
